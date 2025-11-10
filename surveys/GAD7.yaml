@@ -1,0 +1,43 @@
+key: GAD7
+title: GAD-7 (Generalized Anxiety Disorder-7)
+input_type: radio
+scoring: gad7_sum
+domains: {}
+choices:
+- - 전혀 없음
+  - 0
+- - 며칠 동안
+  - 1
+- - 1주일 이상
+  - 2
+- - 거의 매일
+  - 3
+max_score: 21
+items:
+- 'no': 1
+  text: 초조하거나 불안하거나 조마조마하게 느낀다.
+- 'no': 2
+  text: 걱정하는 것을 멈추거나 조절할 수가 없다.
+- 'no': 3
+  text: 여러 가지 것들에 대해 걱정을 너무 많이 한다.
+- 'no': 4
+  text: 편하게 있기가 어렵다.
+- 'no': 5
+  text: 너무 안절부절못해서 가만히 있기가 힘들다.
+- 'no': 6
+  text: 쉽게 짜증이 나거나 쉽게 성을 내게 된다.
+- 'no': 7
+  text: 끔찍한 일이 생길 것처럼 두렵게 느낀다.
+severity_thresholds:
+- label: 불안 경증
+  range:
+  - 5
+  - 9
+- label: 불안 중등도
+  range:
+  - 10
+  - 14
+- label: 불안 중등도-중증
+  range:
+  - 15
+  - 21

@@ -1,0 +1,11 @@
+key: VASD
+title: VAS-D (Visual Analogue Scale - Dizziness)
+input_type: slider_0_10
+scoring: vasd_value
+domains: {}
+max_score: 10
+items:
+- 'no': 1
+  text: 최근 1주간 어지럼증은 어느 정도였습니까? (0=없음, 10=상상 가능한 가장 심함)
+  min: 0
+  max: 10

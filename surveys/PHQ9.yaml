@@ -1,0 +1,51 @@
+key: PHQ9
+title: PHQ-9 (Patient Health Questionnaire-9)
+input_type: radio
+scoring: phq9_sum
+domains: {}
+choices:
+- - 전혀 없음
+  - 0
+- - 며칠 동안
+  - 1
+- - 일주일 이상
+  - 2
+- - 거의 매일
+  - 3
+max_score: 27
+items:
+- 'no': 1
+  text: 기분이 가라앉거나, 우울하거나, 희망이 없다고 느꼈다.
+- 'no': 2
+  text: 평소 하던 일에 대한 흥미가 없어지거나 즐거움을 느끼지 못했다.
+- 'no': 3
+  text: 잠들기가 어렵거나 자주 깼다/혹은 너무 많이 잤다.
+- 'no': 4
+  text: 평소보다 식욕이 줄었다/혹은 평소보다 많이 먹었다.
+- 'no': 5
+  text: 다른 사람들이 눈치 챌 정도로 말/행동이 느려졌다 혹은 너무 안절부절못했다.
+- 'no': 6
+  text: 피곤하고 기운이 없었다.
+- 'no': 7
+  text: 내가 잘못했거나 실패했다는 생각, 자신/가족을 실망시켰다고 느꼈다.
+- 'no': 8
+  text: 읽기/TV 시청 등 일상적인 일에도 집중하기 어려웠다.
+- 'no': 9
+  text: 차라리 죽는 것이 낫겠다거나 자해 생각이 들었다.
+severity_thresholds:
+- label: 우울증 아님
+  range:
+  - 0
+  - 4
+- label: 가벼운 우울증
+  range:
+  - 5
+  - 9
+- label: 중간정도 우울증
+  range:
+  - 10
+  - 19
+- label: 심한 우울증
+  range:
+  - 20
+  - 27

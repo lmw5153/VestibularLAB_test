@@ -49,7 +49,7 @@ SCORERS = {
 }
 
 st.set_page_config(
-    page_title="인지 설문 플랫폼 (멀티)",
+    page_title="설문 플랫폼 Vestibular LAB",
     layout="wide",
     initial_sidebar_state="collapsed"
 )

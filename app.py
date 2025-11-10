@@ -215,36 +215,61 @@ if st.session_state.page == 1:
                     st.session_state._pending_preset = pick
                     st.rerun()
 
-    with right:
-        st.subheader("참여자/동의")
-        name = st.text_input("이름", value=st.session_state.participant_name)
-        if st.session_state.participant_birth:
-            _birth_date = pd.to_datetime(st.session_state.participant_birth).date()
-            dob = st.date_input("생년월일", value=_birth_date, key="dob")
-        else:
-            dob = st.date_input("생년월일", key="dob")
-        sex = st.selectbox("성별", ["", "남", "여", "기타"],
-                           index=["","남","여","기타"].index(st.session_state.participant_sex or ""))
-        notes = st.text_area("기타사항", value=st.session_state.participant_notes, height=90,
-                             placeholder="알레르기, 복용약, 주의사항 등")
-        pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
-        agree = st.checkbox("개인정보 이용에 동의합니다.")
+with right:
+    st.subheader("참여자/동의")
 
-        start_disabled = (not agree) or (not name.strip()) or (len(st.session_state.selected_keys) == 0)
-        if st.button("검사 시작", type="primary", disabled=start_disabled):
-            st.session_state.participant_name = name.strip()
-            st.session_state.participant_birth = dob.isoformat() if dob else None
-            st.session_state.participant_sex = sex
-            st.session_state.participant_notes = notes.strip()
-            st.session_state.participant_id = pid.strip()
+    # 이름/성별/메모는 선택사항
+    name = st.text_input("이름 (선택)", value=st.session_state.participant_name)
 
-            st.session_state.queue = list(st.session_state.selected_keys)
-            st.session_state.curr_idx = 0
-            st.session_state.answers_map = {}
-            st.session_state.summaries = {}
-            st.session_state.page = 2
-            st.session_state.loading_until = time.time() + 1.0
-            st.rerun()
+    # ▶ 생년월일: yyyy.mm.dd 텍스트 입력
+    dob_text = st.text_input(
+        "생년월일 (yyyy.mm.dd, 선택)",
+        value=(st.session_state.participant_birth or ""),
+        placeholder="예) 1992.07.15"
+    )
+
+    sex = st.selectbox("성별 (선택)", ["", "남", "여", "기타"],
+                       index=["","남","여","기타"].index(st.session_state.participant_sex or ""))
+    notes = st.text_area("기타사항 (선택)", value=st.session_state.participant_notes, height=90,
+                         placeholder="알레르기, 복용약, 주의사항 등")
+    pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
+
+    agree = st.checkbox("개인정보 이용에 동의합니다.")
+
+    # ▶ 동의만 체크되면 시작 버튼 활성화 (다른 칸 미기입 허용)
+    start_disabled = not agree
+
+    if st.button("검사 시작", type="primary", disabled=start_disabled):
+        # 텍스트 dob 파싱 시도 (유효성 약하게)
+        birth_iso = ""
+        s = dob_text.strip()
+        if s:
+            # 허용 형식: yyyy.mm.dd 또는 yyyy-mm-dd 또는 yyyy/mm/dd
+            for sep in [".", "-", "/"]:
+                if sep in s:
+                    parts = s.split(sep)
+                    if len(parts) == 3:
+                        y, m, d = parts
+                        try:
+                            y, m, d = int(y), int(m), int(d)
+                            birth_iso = f"{y:04d}-{m:02d}-{d:02d}"
+                        except Exception:
+                            birth_iso = ""
+                    break
+
+        st.session_state.participant_name = name.strip()
+        st.session_state.participant_birth = birth_iso  # "" 또는 "YYYY-MM-DD"
+        st.session_state.participant_sex = sex
+        st.session_state.participant_notes = notes.strip()
+        st.session_state.participant_id = pid.strip()
+
+        st.session_state.queue = list(st.session_state.selected_keys)
+        st.session_state.curr_idx = 0
+        st.session_state.answers_map = {}
+        st.session_state.summaries = {}
+        st.session_state.page = 2
+        st.session_state.loading_until = time.time() + 1.0
+        st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────

@@ -5,7 +5,11 @@
 # - DHI/VADL 채점, CSV/Google Sheets 저장
 # - 규칙 기반 이상탐지 + LLM 기반 모순 가능성 요약(키 자동탐지)
 # - 키 상태 사이드바 마스킹 표시(노출 방지)
-
+# --- force project root on sys.path ---
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 import os
 import json
 import time

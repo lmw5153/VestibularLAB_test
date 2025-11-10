@@ -1,4 +1,4 @@
-llm.py 수정해줘 # utils/llm.py — LLM 기반 이상응답 추론 (모순/불일치 전용)
+ # utils/llm.py — LLM 기반 이상응답 추론 (모순/불일치 전용)
 # 양쪽 SDK 호환: openai v1 (OpenAI) + 레거시(openai.ChatCompletion)
 from typing import Dict, Any
 import os, json

@@ -29,7 +29,12 @@ from utils.llm import run_llm_inference
 from scoring.dhi import DHIScorer
 from scoring.vadl import VADLScorer
 
-SCORERS = {"DHI": DHIScorer(), "VADL": VADLScorer()}
+SCORERS = {
+    "DHI": DHIScorer(),
+    "VADL": VADLScorer(),
+    "MIDAS": MIDASScorer(),
+    "HIT6": HIT6Scorer(),
+}
 st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
 
 
@@ -113,10 +118,8 @@ with st.sidebar.expander("🔐 LLM 키 상태(마스킹)"):
 # PAGE 1 — 메인(설문 선택/프리셋/참여자/시작)
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
-    st.title("🧠 설문 플랫폼 — Vestibular LAB")
-    st.write("안녕하세요. 전북대 병원 신경과 Vestibular LAB 설문 플랫폼입니다.")
-    st.write("설문지를 선택하여 검사를 진행해주세요.")
-    st.caption("mimic")
+    st.title("🧠 인지 설문 플랫폼 — Multi Survey")
+
     metas = list_surveys()
     key_to_title = {m["key"]: m["title"] for m in metas}
     all_keys = [m["key"] for m in metas]
@@ -273,6 +276,7 @@ elif st.session_state.page == 2:
 
     prev = answers[i] if i < len(answers) else {}
 
+    # ── 라디오(예: DHI/HIT-6)
     if input_type == "radio":
         labels = [c[0] for c in meta.get("choices", [])]
         if not labels:
@@ -309,10 +313,11 @@ elif st.session_state.page == 2:
                 st.session_state[f"i_{key}"] += 1
             st.rerun()
 
+    # ── 슬라이더 + 적용불능(예: VADL)
     elif input_type == "slider_1_10_na":
         na_label = meta.get("na_label", "적용불능")
         has_score = isinstance(prev, dict) and ("score" in prev)
-        was_na = has_score and (prev["score"] is None)
+        was_na = has_score and (prev["score"] is None)   # 기본 False → 평소에는 체크 해제
         prev_val = prev["score"] if (has_score and isinstance(prev["score"], int)) else 1
 
         c1, c2 = st.columns([1, 2])
@@ -344,6 +349,45 @@ elif st.session_state.page == 2:
                 "no": it_no, "domain": it_domain, "text": it_text,
                 "label": na_label if na else str(val), "score": None if na else val
             }
+            if i < len(answers): answers[i] = ans
+            else: answers.append(ans)
+
+            if is_last_item:
+                scorer = SCORERS.get(key)
+                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
+                st.session_state.summaries[key] = summary
+                if is_last_survey:
+                    st.session_state.curr_idx += 1; st.session_state.page = 3
+                else:
+                    st.session_state.curr_idx += 1
+                    next_key = st.session_state.queue[st.session_state.curr_idx]
+                    st.session_state[f"i_{next_key}"] = 0
+                    st.session_state.page = 2
+            else:
+                st.session_state[f"i_{key}"] += 1
+            st.rerun()
+
+    # ── 정수 입력(예: MIDAS)
+    elif input_type == "number_int":
+        it_min = int(it.get("min", 0))
+        it_max = int(it.get("max", 999))
+        prev_val = 0
+        if prev and isinstance(prev.get("score"), int):
+            prev_val = prev["score"]
+
+        val = st.number_input("정수 입력", min_value=it_min, max_value=it_max,
+                              step=1, value=int(prev_val), key=f"num_{key}_{i}")
+
+        c1, c2 = st.columns(2)
+        if c1.button("이전", disabled=(i == 0)):
+            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
+            if i < len(answers): answers[i] = ans
+            else: answers.append(ans)
+            st.session_state[f"i_{key}"] -= 1
+            st.rerun()
+
+        if c2.button(btn_label, type="primary"):
+            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
 

@@ -296,39 +296,38 @@ elif st.session_state.page == 2:
     # Global keyboard (Space/Z always; arrows when not focusing widget)
     components.html("""
     <style>
+      /* 보이지 않는 키보드 트랩(자동 포커스) */
       #kbtrap { position:fixed; opacity:0; pointer-events:none; width:1px; height:1px; left:0; top:0; }
     </style>
     <input id="kbtrap" type="text" autofocus />
+    
     <script>
     (function(){
+      // 항상 전역 키를 잡아 ?kb= 로 전달한다 (포커스 여부 무시)
       const trap = document.getElementById('kbtrap');
       function refocus(){ try{ trap && trap.focus({preventScroll:true}); }catch(e){} }
       window.addEventListener('load', ()=>setTimeout(refocus, 50));
       document.addEventListener('visibilitychange', refocus);
-
-      function isFormFocused(){
-        const el = document.activeElement;
-        if (!el) return false;
-        if (el.id === 'kbtrap') return false;
-        return ['INPUT','TEXTAREA','SELECT','BUTTON'].includes(el.tagName);
+    
+      function fire(action, ev){
+        try {
+          if (ev) ev.preventDefault();
+          const url = new URL(window.location.href);
+          url.searchParams.set('kb', action);
+          window.location.href = url.toString();
+        } catch(e){}
       }
-
+    
       window.addEventListener('keydown', function(e){
-        let action = null;
-        // Space/Z always processed (two-step handled in Python)
-        if (e.code === 'Space') { action='next'; e.preventDefault(); }
-        else if (e.key === 'z' || e.key === 'Z') { action='prev'; }
-        // Arrows only when not focusing a widget
-        if (!action && !isFormFocused()){
-          if (e.key === 'ArrowUp') action='up';
-          else if (e.key === 'ArrowDown') action='down';
-          else if (e.key === 'ArrowLeft') action='left';
-          else if (e.key === 'ArrowRight') action='right';
-        }
-        if (!action) return;
-        const url = new URL(window.location.href);
-        url.searchParams.set('kb', action);
-        window.location.href = url.toString();
+        // Space: 다음(두-단계), Z: 이전(두-단계) — 항상 동작
+        if (e.code === 'Space') { fire('next', e); return; }
+        if (e.key === 'z' || e.key === 'Z') { fire('prev', e); return; }
+    
+        // 화살표도 항상 전역 동작(스크롤 방지)
+        if (e.key === 'ArrowUp')    { fire('up', e); return; }
+        if (e.key === 'ArrowDown')  { fire('down', e); return; }
+        if (e.key === 'ArrowLeft')  { fire('left', e); return; }
+        if (e.key === 'ArrowRight') { fire('right', e); return; }
       }, {passive:false});
     })();
     </script>

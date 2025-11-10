@@ -42,8 +42,12 @@ SCORERS = {
     "PHQ9": PHQ9Scorer(),   # ← 추가
     "GAD7": GAD7Scorer(),   # ← 추가
 }
-st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
-
+#st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
+st.set_page_config(
+    page_title="인지 설문 플랫폼 (멀티)",
+    layout="wide",
+    initial_sidebar_state="collapsed"   # ← 사이드바 기본 접힘
+)
 
 # ─────────────────────────────────────────────────────────────
 # 유틸: LLM 키는 '오직' Streamlit Secrets에서만 읽기
@@ -504,6 +508,11 @@ elif st.session_state.page == 3:
     })
 
     df_out = pd.DataFrame([row])
+    
+    drop_cols = [c for c in df_out.columns if c.endswith("_max")]
+    if drop_cols:
+        df_out = df_out.drop(columns=drop_cols, errors="ignore")
+    
     buf = StringIO(); df_out.to_csv(buf, index=False, encoding="utf-8-sig")
     st.download_button("📥 통합 CSV 다운로드", data=buf.getvalue().encode("utf-8-sig"),
                        file_name=f"{ts.replace(':','-')}_summary.csv", mime="text/csv")

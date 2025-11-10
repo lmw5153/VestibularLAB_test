@@ -1,9 +1,23 @@
 # utils/llm.py — LLM 기반 이상응답 추론 (모순/불일치 전용)
-# 양쪽 SDK 호환: openai v1 (OpenAI) + 레거시(openai.ChatCompletion)
-from typing import Dict, Any
-import os, json
+# - 키 노출 방지: secrets/env 자동 탐지 + 에러 메시지 마스킹
+# - SDK 호환: openai v1(OpenAI) 우선, 미탑재/오류 시 레거시(openai.ChatCompletion) 폴백
+# - 견고성: 재시도(지수 백오프), response_format JSON 강제 → 실패 시 관대한 파싱
+# - 유연성: 모델명 맵핑, BASE_URL/organization 지원(프록시/조직용)
+from __future__ import annotations
+from typing import Dict, Any, Optional
+import os, json, time, math
 
-# 1) 시도: 신형 SDK (openai>=1.x)
+# ─────────────────────────────────────────────────────────────
+# 선택 임포트 (Streamlit이 없어도 동작하도록)
+# ─────────────────────────────────────────────────────────────
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
+# ─────────────────────────────────────────────────────────────
+# OpenAI SDKs (신형 우선, 레거시 폴백)
+# ─────────────────────────────────────────────────────────────
 OpenAI = None
 try:
     from openai import OpenAI as _OpenAI
@@ -11,13 +25,85 @@ try:
 except Exception:
     OpenAI = None
 
-# 2) 레거시 SDK 대비
 LEGACY = None
 try:
     import openai as _legacy_openai
     LEGACY = _legacy_openai
 except Exception:
     LEGACY = None
+
+
+# ─────────────────────────────────────────────────────────────
+# 내부 유틸
+# ─────────────────────────────────────────────────────────────
+def _mask(s: Optional[str], show: int = 4) -> str:
+    if not s:
+        return ""
+    if len(s) <= show * 2:
+        return "*" * len(s)
+    return s[:show] + "•" * 8 + s[-show:]
+
+
+def _safe_err(msg: str) -> str:
+    """키가 우연히 포함돼도 마스킹."""
+    try:
+        k_env = os.getenv("OPENAI_API_KEY", "")
+        if k_env:
+            msg = msg.replace(k_env, "****")
+        if st is not None and hasattr(st, "secrets"):
+            try:
+                if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
+                    msg = msg.replace(st.secrets["openai_api_key"], "****")
+                if "general" in st.secrets:
+                    gen = st.secrets["general"]
+                    if isinstance(gen, dict) and gen.get("openai_api_key"):
+                        msg = msg.replace(gen["openai_api_key"], "****")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return msg
+
+
+def _get_api_key(user_api_key: Optional[str] = None) -> Optional[str]:
+    """우선순위: 전달값 → st.secrets → 환경변수"""
+    if user_api_key:
+        return user_api_key
+    # Streamlit secrets
+    if st is not None and hasattr(st, "secrets"):
+        try:
+            if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
+                return st.secrets["openai_api_key"]
+            if "general" in st.secrets:
+                gen = st.secrets["general"]
+                if isinstance(gen, dict) and gen.get("openai_api_key"):
+                    return gen["openai_api_key"]
+        except Exception:
+            pass
+    # Env
+    return os.getenv("OPENAI_API_KEY")
+
+
+def _get_base_and_org() -> Dict[str, Optional[str]]:
+    """
+    프록시/조직 지원: OPENAI_BASE_URL, OPENAI_ORG (또는 secrets.general.*)
+    """
+    base = os.getenv("OPENAI_BASE_URL")
+    org = os.getenv("OPENAI_ORG")
+    if st is not None and hasattr(st, "secrets"):
+        try:
+            if not base:
+                base = st.secrets.get("openai_base_url", None)
+            if not org:
+                org = st.secrets.get("openai_org", None)
+            if "general" in st.secrets:
+                gen = st.secrets["general"]
+                if isinstance(gen, dict):
+                    base = base or gen.get("openai_base_url")
+                    org = org or gen.get("openai_org")
+        except Exception:
+            pass
+    return {"base_url": base, "organization": org}
 
 
 def _compact_answers(per_survey_raw: Dict[str, list], max_items: int = 80) -> str:
@@ -65,8 +151,8 @@ def _skeleton(msg: str = "") -> Dict[str, Any]:
 
 def _choose_model(model: str) -> str:
     """
-    모델명 유연 처리: 사용자가 'gpt-4o-mini' 미지원이면 'gpt-4o'로 폴백.
-    필요하면 여기서 사내 프록시 모델명 매핑도 가능.
+    모델명 유연 처리: 미지원이면 안전 폴백.
+    필요 시 사내 프록시 모델명 매핑도 여기서.
     """
     prefer = model or "gpt-4o-mini"
     allowed = {"gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"}
@@ -76,111 +162,153 @@ def _choose_model(model: str) -> str:
 
 
 def _parse_json_strict(text: str) -> Dict[str, Any]:
-    # 혹시 모델이 코드블록으로 감싸 보낼 경우 제거
     t = text.strip()
+    # 코드블록 제거
     if t.startswith("```"):
-        t = t.strip("`").strip()
         # ```json ... ```
-        if t.lower().startswith("json"):
-            t = t[4:].strip()
+        if t.lower().startswith("```json"):
+            t = t[7:]
+        t = t.strip("`").strip()
     return json.loads(t)
 
 
+def _retry_sleep(attempt: int, base: float = 0.7, cap: float = 6.0) -> None:
+    """지수 백오프: 0.7, 1.4, 2.8 ... (최대 cap 초) + 소량 지터."""
+    dur = min(cap, base * (2 ** attempt))
+    # 간단 지터
+    dur += (0.05 * (attempt + 1))
+    time.sleep(dur)
+
+
+# ─────────────────────────────────────────────────────────────
+# 공개 함수
+# ─────────────────────────────────────────────────────────────
 def run_llm_inference(
     per_survey_raw: Dict[str, list],
     payload: Dict[str, Any],
-    model: str = "gpt-4o",
-    api_key: str = None
+    model: str = "gpt-4o-mini",
+    api_key: Optional[str] = None,
+    max_retries: int = 3,
 ) -> Dict[str, Any]:
     """
     반환: {"flags":[], "triage":"low|medium|high", "summary_kor":"...", "followups":[...]}
-    - SDK/모델/키 문제 등 모든 예외는 여기서 흡수하여 summary_kor에 원인 표시
+    - 키/SDK/네트워크 오류는 내부에서 처리하고 summary_kor에 요약
+    - 절대 키를 그대로 포함한 에러문을 반환하지 않음(마스킹)
     """
-    # 키 확인
-    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    api_key = _get_api_key(api_key)
     if not api_key:
         return _skeleton("OPENAI_API_KEY 미설정으로 LLM 건너뜀.")
 
     answers_compact = _compact_answers(per_survey_raw, max_items=120)
     prompt = _build_prompt(payload, answers_compact)
     model_use = _choose_model(model)
+    conn = _get_base_and_org()  # base_url/organization
 
-    # 1) 신형 SDK 경로
+    # ── 1) 신형 SDK 경로 ───────────────────────────────────────────
+    last_err = ""
     if OpenAI is not None:
-        try:
-            client = OpenAI(api_key=api_key)
-            # 일부 환경에서 response_format 미지원일 수 있어 안전 폴백
+        for attempt in range(max_retries):
             try:
-                resp = client.chat.completions.create(
-                    model=model_use,
-                    temperature=0.2,
-                    messages=[
-                        {"role": "system", "content": "당신은 임상 설문 모순 탐지 보조자입니다. 진단 금지."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
+                client = OpenAI(
+                    api_key=api_key,
+                    base_url=conn["base_url"] or None,
+                    organization=conn["organization"] or None,
                 )
-            except Exception:
-                # 폴백: response_format 없이 요청
-                resp = client.chat.completions.create(
-                    model=model_use,
-                    temperature=0.2,
-                    messages=[
-                        {"role": "system", "content": "당신은 임상 설문 모순 탐지 보조자입니다. 진단 금지."},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-            txt = resp.choices[0].message.content
-            try:
-                data = _parse_json_strict(txt)
-            except Exception:
-                # 모델이 JSON 형식을 안지킨 경우 방어
-                return _skeleton(f"LLM 응답 파싱 실패(비JSON): {txt[:160]}...")
+                # response_format 우선 사용 → 실패 시 폴백
+                try:
+                    resp = client.chat.completions.create(
+                        model=model_use,
+                        temperature=0.2,
+                        messages=[
+                            {"role": "system", "content": "당신은 임상 설문 모순 탐지 보조자입니다. 진단 금지."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        response_format={"type": "json_object"},
+                        max_tokens=800,
+                    )
+                except Exception:
+                    resp = client.chat.completions.create(
+                        model=model_use,
+                        temperature=0.2,
+                        messages=[
+                            {"role": "system", "content": "당신은 임상 설문 모순 탐지 보조자입니다. 진단 금지."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        max_tokens=800,
+                    )
+                txt = resp.choices[0].message.content
+                try:
+                    data = _parse_json_strict(txt)
+                except Exception:
+                    return _skeleton(f"LLM 응답 파싱 실패(비JSON): {txt[:160]}...")
 
-            data.setdefault("flags", [])
-            data.setdefault("triage", "low")
-            data.setdefault("summary_kor", "")
-            data.setdefault("followups", [])
-            # evidence 과다시 제한
-            for f in data["flags"]:
-                if isinstance(f.get("evidence"), list) and len(f["evidence"]) > 6:
-                    f["evidence"] = f["evidence"][:6]
-            return data
-        except Exception as e:
-            # 신형 실패 시 레거시로 폴백 시도
-            err_msg = str(e)
+                data.setdefault("flags", [])
+                data.setdefault("triage", "low")
+                data.setdefault("summary_kor", "")
+                data.setdefault("followups", [])
+                # evidence 길이 제한
+                for f in data["flags"]:
+                    if isinstance(f.get("evidence"), list) and len(f["evidence"]) > 6:
+                        f["evidence"] = f["evidence"][:6]
+                return data
 
+            except Exception as e:
+                last_err = _safe_err(str(e))
+                if attempt < max_retries - 1:
+                    _retry_sleep(attempt)
+                else:
+                    break
     else:
-        err_msg = "openai>=1.x 클라이언트 미탑재"
+        last_err = "openai>=1.x 클라이언트 미탑재"
 
-    # 2) 레거시 SDK 경로 (가능하면 시도)
+    # ── 2) 레거시 SDK 폴백 ─────────────────────────────────────────
     if LEGACY is not None:
-        try:
-            LEGACY.api_key = api_key
-            resp = LEGACY.ChatCompletion.create(
-                model=model_use,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": "당신은 임상 설문 모순 탐지 보조자입니다. 진단 금지."},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            txt = resp["choices"][0]["message"]["content"]
+        for attempt in range(max_retries):
             try:
-                data = _parse_json_strict(txt)
-            except Exception:
-                return _skeleton(f"(레거시) LLM 응답 파싱 실패(비JSON): {txt[:160]}...")
+                LEGACY.api_key = api_key
+                base_url = conn["base_url"]
+                organization = conn["organization"]
+                # 레거시 SDK는 base_url/organization 지원 방식이 다를 수 있어 조건부 적용
+                if organization:
+                    LEGACY.organization = organization
+                if base_url:
+                    try:
+                        LEGACY.api_base = base_url
+                    except Exception:
+                        pass
 
-            data.setdefault("flags", [])
-            data.setdefault("triage", "low")
-            data.setdefault("summary_kor", "")
-            data.setdefault("followups", [])
-            for f in data["flags"]:
-                if isinstance(f.get("evidence"), list) and len(f["evidence"]) > 6:
-                    f["evidence"] = f["evidence"][:6]
-            return data
-        except Exception as e2:
-            return _skeleton(f"LLM 호출 오류(레거시): {e2}")
+                resp = LEGACY.ChatCompletion.create(
+                    model=model_use,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "system", "content": "당신은 임상 설문 모순 탐지 보조자입니다. 진단 금지."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=800,
+                )
+                txt = resp["choices"][0]["message"]["content"]
+                try:
+                    data = _parse_json_strict(txt)
+                except Exception:
+                    return _skeleton(f"(레거시) LLM 응답 파싱 실패(비JSON): {txt[:160]}...")
 
-    # 둘 다 실패
-    return _skeleton(f"LLM 호출 준비 실패: {err_msg} / 레거시 SDK도 미탑재")
+                data.setdefault("flags", [])
+                data.setdefault("triage", "low")
+                data.setdefault("summary_kor", "")
+                data.setdefault("followups", [])
+                for f in data["flags"]:
+                    if isinstance(f.get("evidence"), list) and len(f["evidence"]) > 6:
+                        f["evidence"] = f["evidence"][:6]
+                return data
+
+            except Exception as e2:
+                last_err = _safe_err(str(e2))
+                if attempt < max_retries - 1:
+                    _retry_sleep(attempt)
+                else:
+                    break
+
+        return _skeleton(f"LLM 호출 오류(레거시): {last_err}")
+
+    # ── 3) 둘 다 실패 ─────────────────────────────────────────────
+    return _skeleton(f"LLM 호출 준비 실패: {last_err} / 레거시 SDK도 미탑재")

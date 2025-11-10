@@ -1,10 +1,11 @@
 # app.py — Multi Survey Platform (Neurology / Cognitive)
-# - Sidebar collapsed by default
+# - Sidebar collapsed
 # - DOB text input yyyy.mm.dd (optional); Only consent is required to start
-# - Keyboard shortcuts: ↑/↓ radio, ←/→ slider, Space=next, Z=prev
+# - Global keyboard: Space=next (always), Z=prev (always), ↑/↓ radio, ←/→ slider
+# - Default answer preselected per item (no mouse needed to proceed)
 # - Surveys: DHI, VADL, MIDAS, HIT-6, VAS-D, PHQ-9, GAD-7
-# - CSV export (drops *_max columns), optional Google Sheets
-# - LLM consistency (secrets only)
+# - CSV export drops *_max columns
+# - LLM API key from st.secrets only
 
 import os, sys, time, json
 from io import StringIO
@@ -16,7 +17,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 # ─────────────────────────────────────────────────────────────
-# Project path fix
+# Project path
 # ─────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -129,7 +130,7 @@ def init_state():
 init_state()
 
 # ─────────────────────────────────────────────────────────────
-# Sidebar (collapsible by default)
+# Sidebar (collapsed by default)
 # ─────────────────────────────────────────────────────────────
 st.sidebar.subheader("Google Sheets 연동(옵션)")
 gs_enable = st.sidebar.checkbox("응답을 Google Sheets로 저장", value=False)
@@ -293,62 +294,39 @@ if st.session_state.page == 1:
 # PAGE 2 — Survey flow
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 2:
-    # Inject global keyboard hook (Space/Arrows/Z) → ?kb=action
+    # Global keyboard (Space/Z always, Arrows when not in widget)
     components.html("""
     <style>
-      /* 화면에 보이지 않는 키보드 트랩 */
-      #kbtrap {
-        position: fixed;
-        opacity: 0;
-        pointer-events: none;
-        width: 1px;
-        height: 1px;
-        left: 0; top: 0;
-      }
+      #kbtrap { position:fixed; opacity:0; pointer-events:none; width:1px; height:1px; left:0; top:0; }
     </style>
     <input id="kbtrap" type="text" autofocus />
-    
     <script>
     (function(){
       const trap = document.getElementById('kbtrap');
-      if (trap) {
-        // 페이지 진입 시/리렌더 시 자동 포커스 재시도
-        function refocusTrap(){
-          try { trap.focus({preventScroll:true}); } catch(e){}
-        }
-        refocusTrap();
-        // 혹시 포커스가 벗어났으면 살짝 뒤에 재포커스
-        document.addEventListener('visibilitychange', refocusTrap);
-        window.addEventListener('load', () => setTimeout(refocusTrap, 50));
-      }
-    
-      // 입력 위젯 포커스면 방해하지 않되, kbtrap에 포커스일 땐 전역 키 처리 허용
+      function refocus(){ try{ trap && trap.focus({preventScroll:true}); }catch(e){} }
+      window.addEventListener('load', ()=>setTimeout(refocus, 50));
+      document.addEventListener('visibilitychange', refocus);
+
       function isFormFocused(){
         const el = document.activeElement;
         if (!el) return false;
-        const tag = el.tagName;
-        const id  = el.id || '';
-        if (id === 'kbtrap') return false;                 // ← 우리 트랩은 예외
-        return ['INPUT','TEXTAREA','SELECT','BUTTON'].includes(tag);
+        if (el.id === 'kbtrap') return false;
+        return ['INPUT','TEXTAREA','SELECT','BUTTON'].includes(el.tagName);
       }
-    
+
       window.addEventListener('keydown', function(e){
-        // 전역 단축키: Space/Arrows/Z
         let action = null;
-    
-        if (e.code === 'Space'){ action='next'; e.preventDefault(); }
-        else if (e.key === 'z' || e.key === 'Z'){ action='prev'; }
-        else if (e.key === 'ArrowUp'){ action='up'; }
-        else if (e.key === 'ArrowDown'){ action='down'; }
-        else if (e.key === 'ArrowLeft'){ action='left'; }
-        else if (e.key === 'ArrowRight'){ action='right'; }
-    
+        // Space/Z always handled (prev/next always active)
+        if (e.code === 'Space') { action='next'; e.preventDefault(); }
+        else if (e.key === 'z' || e.key === 'Z') { action='prev'; }
+        // Arrows only when not focusing a form widget
+        if (!action && !isFormFocused()){
+          if (e.key === 'ArrowUp') action='up';
+          else if (e.key === 'ArrowDown') action='down';
+          else if (e.key === 'ArrowLeft') action='left';
+          else if (e.key === 'ArrowRight') action='right';
+        }
         if (!action) return;
-    
-        // 위젯에 직접 포커스가 있을 때는 그 위젯의 기본 키보드 동작을 존중
-        if (isFormFocused()) return;
-    
-        // 쿼리 파라미터로 액션 전달 → Streamlit rerun
         const url = new URL(window.location.href);
         url.searchParams.set('kb', action);
         window.location.href = url.toString();
@@ -408,7 +386,32 @@ elif st.session_state.page == 2:
     prev = answers[i] if i < len(answers) else {}
 
     # ─────────────────────────────────────────────────────────
-    # Keyboard param handler (apply before rendering widgets)
+    # (A) 기본 응답값을 항상 세션에 주입 → 클릭 없이 Space 진행 보장
+    # ─────────────────────────────────────────────────────────
+    if input_type == "radio":
+        labels = [c[0] for c in meta.get("choices", [])]
+        if labels:
+            ss_key = f"radio_{key}_{i}"
+            if ss_key not in st.session_state:
+                st.session_state[ss_key] = labels[0]  # 첫 항목 기본 선택
+    elif input_type == "slider_0_10":
+        ss_key = f"vas_{key}_{i}"
+        if ss_key not in st.session_state:
+            st.session_state[ss_key] = int(it.get("min", 0))  # 기본 0
+    elif input_type == "slider_1_10_na":
+        ss_na  = f"na_{key}_{i}"
+        ss_val = f"slider_{key}_{i}"
+        if ss_na not in st.session_state:
+            st.session_state[ss_na] = False            # 적용불능 기본 해제
+        if ss_val not in st.session_state:
+            st.session_state[ss_val] = 1               # 기본 1점
+    elif input_type == "number_int":
+        ss_key = f"num_{key}_{i}"
+        if ss_key not in st.session_state:
+            st.session_state[ss_key] = int(it.get("min", 0))  # 기본 min
+
+    # ─────────────────────────────────────────────────────────
+    # (B) Keyboard param handler
     # ─────────────────────────────────────────────────────────
     kb = get_qp("kb", None)
     if kb:
@@ -417,9 +420,9 @@ elif st.session_state.page == 2:
         # Arrow movement: update widget state keys; then rerun
         if input_type == "radio" and kb in ("up","down"):
             labels = [c[0] for c in meta.get("choices", [])]
-            current = prev.get("label") if prev else None
-            if current not in labels:
-                current = labels[0] if labels else None
+            current = st.session_state.get(f"radio_{key}_{i}", None)
+            if current not in labels and labels:
+                current = labels[0]
             idx_cur = labels.index(current) if (current in labels) else 0
             if kb == "up":
                 new_idx = max(0, idx_cur - 1); handled = True
@@ -429,8 +432,7 @@ elif st.session_state.page == 2:
                 st.session_state[f"radio_{key}_{i}"] = labels[new_idx]
 
         if input_type == "slider_0_10" and kb in ("left","right"):
-            cur = prev.get("score") if isinstance(prev, dict) else None
-            if not isinstance(cur, int): cur = int(it.get("min", 0))
+            cur = st.session_state.get(f"vas_{key}_{i}", int(it.get("min", 0)))
             if kb == "left":
                 cur = max(int(it.get("min", 0)), cur - 1); handled = True
             else:
@@ -439,65 +441,41 @@ elif st.session_state.page == 2:
                 st.session_state[f"vas_{key}_{i}"] = int(cur)
 
         if input_type == "slider_1_10_na" and kb in ("left","right"):
-            cur = prev.get("score") if isinstance(prev, dict) else None
-            if isinstance(cur, int):
+            na = st.session_state.get(f"na_{key}_{i}", False)
+            if not na:
+                cur = st.session_state.get(f"slider_{key}_{i}", 1)
                 if kb == "left":
                     cur = max(1, cur - 1); handled = True
                 else:
                     cur = min(10, cur + 1); handled = True
-                if handled:
-                    st.session_state[f"slider_{key}_{i}"] = int(cur)
+                st.session_state[f"slider_{key}_{i}"] = int(cur)
 
-        # prev/next: attempt to move across items now
+        # prev/next moves
         def _save_and_advance_next():
-            # read current value from session_state if exists, else from prev/default
             if input_type == "radio":
-                labels = [c[0] for c in meta.get("choices", [])]
-                # current selection
-                ss_key = f"radio_{key}_{i}"
-                sel = st.session_state.get(ss_key, None)
-                if sel is None:
-                    sel = prev.get("label") if prev else (labels[0] if labels else "")
+                sel = st.session_state.get(f"radio_{key}_{i}")
                 score = dict(meta.get("choices", [])).get(sel, 0)
                 ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
 
             elif input_type == "number_int":
-                ss_key = f"num_{key}_{i}"
-                val = st.session_state.get(ss_key, None)
-                if not isinstance(val, int):
-                    # fallback to prev or min
-                    if isinstance(prev.get("score"), int):
-                        val = prev["score"]
-                    else:
-                        val = int(it.get("min", 0))
-                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
+                val = int(st.session_state.get(f"num_{key}_{i}", int(it.get("min", 0))))
+                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": val}
 
             elif input_type == "slider_0_10":
-                ss_key = f"vas_{key}_{i}"
-                val = st.session_state.get(ss_key, None)
-                if not isinstance(val, int):
-                    if isinstance(prev.get("score"), int):
-                        val = prev["score"]
-                    else:
-                        val = int(it.get("min", 0))
-                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
+                val = int(st.session_state.get(f"vas_{key}_{i}", int(it.get("min", 0))))
+                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": val}
 
             elif input_type == "slider_1_10_na":
-                ss_na = f"na_{key}_{i}"
-                ss_val = f"slider_{key}_{i}"
-                na = st.session_state.get(ss_na, False)
-                val = st.session_state.get(ss_val, None)
+                na  = st.session_state.get(f"na_{key}_{i}", False)
+                val = st.session_state.get(f"slider_{key}_{i}", 1)
                 if na:
                     ans = {"no": it_no, "domain": it_domain, "text": it_text,
                            "label": meta.get("na_label","적용불능"), "score": None}
                 else:
-                    if not isinstance(val, int):
-                        if isinstance(prev.get("score"), int): val = prev["score"]
-                        else: val = 1
                     ans = {"no": it_no, "domain": it_domain, "text": it_text,
                            "label": str(val), "score": int(val)}
             else:
-                return  # unsupported type; do nothing
+                return
 
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
@@ -531,14 +509,15 @@ elif st.session_state.page == 2:
             st.rerun()
 
     # ─────────────────────────────────────────────────────────
-    # Input rendering (mouse UI kept as-is)
+    # Input rendering (mouse UI remains)
     # ─────────────────────────────────────────────────────────
     # 1) Radio (DHI/HIT-6/PHQ-9/GAD-7)
     if input_type == "radio":
         labels = [c[0] for c in meta.get("choices", [])]
         if not labels:
             st.error("이 설문은 choices가 비어 있습니다."); st.stop()
-        default_idx = labels.index(prev.get("label")) if (prev and prev.get("label") in labels) else 0
+        # default index aligns with session state we injected above
+        default_idx = labels.index(st.session_state.get(f"radio_{key}_{i}", labels[0])) if labels else 0
         sel = st.radio("응답 선택", labels, index=default_idx, key=f"radio_{key}_{i}")
         score = dict(meta.get("choices", [])).get(sel, 0)
 
@@ -572,15 +551,14 @@ elif st.session_state.page == 2:
     # 2) Slider 1–10 with NA (VADL)
     elif input_type == "slider_1_10_na":
         na_label = meta.get("na_label", "적용불능")
-        has_score = isinstance(prev, dict) and ("score" in prev)
-        was_na = has_score and (prev["score"] is None)   # default False
-        prev_val = prev["score"] if (has_score and isinstance(prev["score"], int)) else 1
+        na  = st.session_state.get(f"na_{key}_{i}", False)
+        val = st.session_state.get(f"slider_{key}_{i}", 1)
 
         c1, c2 = st.columns([1, 2])
         with c1:
-            na = st.checkbox(na_label, value=was_na, key=f"na_{key}_{i}")
+            na = st.checkbox(na_label, value=na, key=f"na_{key}_{i}")
         with c2:
-            val = st.slider("점수 (1–10)", 1, 10, value=prev_val, step=1, disabled=na, key=f"slider_{key}_{i}")
+            val = st.slider("점수 (1–10)", 1, 10, value=val, step=1, disabled=na, key=f"slider_{key}_{i}")
 
         if not na:
             info_map = meta.get("score_info", {})
@@ -624,14 +602,9 @@ elif st.session_state.page == 2:
 
     # 3) Number int (MIDAS)
     elif input_type == "number_int":
-        it_min = int(it.get("min", 0))
-        it_max = int(it.get("max", 999))
-        prev_val = 0
-        if prev and isinstance(prev.get("score"), int):
-            prev_val = prev["score"]
-
-        val = st.number_input("정수 입력", min_value=it_min, max_value=it_max,
-                              step=1, value=int(prev_val), key=f"num_{key}_{i}")
+        val = int(st.session_state.get(f"num_{key}_{i}", int(it.get("min", 0))))
+        val = st.number_input("정수 입력", min_value=int(it.get("min", 0)), max_value=int(it.get("max", 999)),
+                              step=1, value=int(val), key=f"num_{key}_{i}")
 
         c1, c2 = st.columns(2)
         if c1.button("이전", disabled=(i == 0)):
@@ -662,13 +635,9 @@ elif st.session_state.page == 2:
 
     # 4) Slider 0–10 (VAS-D)
     elif input_type == "slider_0_10":
-        it_min = int(it.get("min", 0))
-        it_max = int(it.get("max", 10))
-        prev_val = 0
-        if prev and isinstance(prev.get("score"), int):
-            prev_val = prev["score"]
-
-        val = st.slider("점수 (0–10)", it_min, it_max, value=prev_val, step=1, key=f"vas_{key}_{i}")
+        val = int(st.session_state.get(f"vas_{key}_{i}", int(it.get("min", 0))))
+        val = st.slider("점수 (0–10)", int(it.get("min", 0)), int(it.get("max", 10)),
+                        value=val, step=1, key=f"vas_{key}_{i}")
 
         c1, c2 = st.columns(2)
         if c1.button("이전", disabled=(i == 0)):
@@ -716,7 +685,6 @@ elif st.session_state.page == 3:
                 st.metric("총점", s["total"], delta=f"/ {s['max']}")
             else:
                 st.metric("총점", s["total"])
-            # severity label support (PHQ9/GAD7)
             if "severity" in s:
                 st.caption(f"등급: {s['severity']}")
             for dkey, dval in s.get("domains", {}).items():

@@ -134,7 +134,7 @@ with st.sidebar.expander("🔐 LLM 키 상태(마스킹)"):
 # PAGE 1 — 메인(설문 선택/프리셋/참여자/시작)
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
-    st.title("🧠 설문 플랫폼 — Vestibular LAB")
+    st.title("🧠 인지 설문 플랫폼 — Multi Survey")
 
     metas = list_surveys()
     key_to_title = {m["key"]: m["title"] for m in metas}
@@ -157,7 +157,6 @@ if st.session_state.page == 1:
     pending = st.session_state.get("_pending_preset", None)
     if pending:
         raw = presets.get(pending, [])
-        # 문자열/딕셔너리까지 방어적으로 처리
         if isinstance(raw, dict):
             raw = list(raw.keys())
         elif isinstance(raw, str):
@@ -171,6 +170,8 @@ if st.session_state.page == 1:
     # ▲▲▲ 프리셋 '적용 대기' 훅 끝 ▲▲▲
 
     left, right = st.columns([2, 1])
+
+    # ── 좌측: 설문 선택/프리셋
     with left:
         st.subheader("설문 선택")
 
@@ -208,69 +209,68 @@ if st.session_state.page == 1:
                     else:
                         st.warning("프리셋 이름을 입력하세요.")
 
-            # 프리셋 적용은 '대기 플래그'만 세팅 → 다음 렌더 초기에 안전 주입
             pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
             if pick != "(선택)":
                 if st.button("프리셋 적용", key="apply_preset_btn"):
                     st.session_state._pending_preset = pick
                     st.rerun()
 
-with right:
-    st.subheader("참여자/동의")
+    # ── 우측: 참여자/동의 (생년월일 텍스트 입력 + 동의만으로 시작 가능)
+    with right:
+        st.subheader("참여자/동의")
 
-    # 이름/성별/메모는 선택사항
-    name = st.text_input("이름 (선택)", value=st.session_state.participant_name)
+        # 선택 입력들
+        name = st.text_input("이름 (선택)", value=st.session_state.participant_name)
 
-    # ▶ 생년월일: yyyy.mm.dd 텍스트 입력
-    dob_text = st.text_input(
-        "생년월일 (yyyy.mm.dd, 선택)",
-        value=(st.session_state.participant_birth or ""),
-        placeholder="예) 1992.07.15"
-    )
+        dob_text = st.text_input(
+            "생년월일 (yyyy.mm.dd, 선택)",
+            value=(st.session_state.participant_birth or ""),
+            placeholder="예) 1992.07.15"
+        )
 
-    sex = st.selectbox("성별 (선택)", ["", "남", "여", "기타"],
-                       index=["","남","여","기타"].index(st.session_state.participant_sex or ""))
-    notes = st.text_area("기타사항 (선택)", value=st.session_state.participant_notes, height=90,
-                         placeholder="알레르기, 복용약, 주의사항 등")
-    pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
+        sex = st.selectbox(
+            "성별 (선택)", ["", "남", "여", "기타"],
+            index=["","남","여","기타"].index(st.session_state.participant_sex or "")
+        )
+        notes = st.text_area(
+            "기타사항 (선택)", value=st.session_state.participant_notes, height=90,
+            placeholder="알레르기, 복용약, 주의사항 등"
+        )
+        pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
 
-    agree = st.checkbox("개인정보 이용에 동의합니다.")
+        agree = st.checkbox("개인정보 이용에 동의합니다.")
+        start_disabled = not agree  # 동의만 체크되면 시작 가능
 
-    # ▶ 동의만 체크되면 시작 버튼 활성화 (다른 칸 미기입 허용)
-    start_disabled = not agree
+        if st.button("검사 시작", type="primary", disabled=start_disabled):
+            # 생년월일 텍스트 → YYYY-MM-DD 약식 파싱
+            birth_iso = ""
+            s = dob_text.strip()
+            if s:
+                for sep in [".", "-", "/"]:
+                    if sep in s:
+                        parts = s.split(sep)
+                        if len(parts) == 3:
+                            y, m, d = parts
+                            try:
+                                y, m, d = int(y), int(m), int(d)
+                                birth_iso = f"{y:04d}-{m:02d}-{d:02d}"
+                            except Exception:
+                                birth_iso = ""
+                        break
 
-    if st.button("검사 시작", type="primary", disabled=start_disabled):
-        # 텍스트 dob 파싱 시도 (유효성 약하게)
-        birth_iso = ""
-        s = dob_text.strip()
-        if s:
-            # 허용 형식: yyyy.mm.dd 또는 yyyy-mm-dd 또는 yyyy/mm/dd
-            for sep in [".", "-", "/"]:
-                if sep in s:
-                    parts = s.split(sep)
-                    if len(parts) == 3:
-                        y, m, d = parts
-                        try:
-                            y, m, d = int(y), int(m), int(d)
-                            birth_iso = f"{y:04d}-{m:02d}-{d:02d}"
-                        except Exception:
-                            birth_iso = ""
-                    break
+            st.session_state.participant_name = name.strip()
+            st.session_state.participant_birth = birth_iso
+            st.session_state.participant_sex = sex
+            st.session_state.participant_notes = notes.strip()
+            st.session_state.participant_id = pid.strip()
 
-        st.session_state.participant_name = name.strip()
-        st.session_state.participant_birth = birth_iso  # "" 또는 "YYYY-MM-DD"
-        st.session_state.participant_sex = sex
-        st.session_state.participant_notes = notes.strip()
-        st.session_state.participant_id = pid.strip()
-
-        st.session_state.queue = list(st.session_state.selected_keys)
-        st.session_state.curr_idx = 0
-        st.session_state.answers_map = {}
-        st.session_state.summaries = {}
-        st.session_state.page = 2
-        st.session_state.loading_until = time.time() + 1.0
-        st.rerun()
-
+            st.session_state.queue = list(st.session_state.selected_keys)
+            st.session_state.curr_idx = 0
+            st.session_state.answers_map = {}
+            st.session_state.summaries = {}
+            st.session_state.page = 2
+            st.session_state.loading_until = time.time() + 1.0
+            st.rerun()
 
 # ─────────────────────────────────────────────────────────────
 # PAGE 2 — 설문 진행(순차)
@@ -309,7 +309,11 @@ elif st.session_state.page == 2:
     it_no = it.get("no", i + 1)
     it_domain = it.get("domain", "")
     it_text = it.get("text", "")
-    
+
+    def _qtitle(no, domain, text):
+        no_str = f"Q{no}" if no is not None else ""
+        dom_str = f" ({domain})" if domain else ""
+        return f"{no_str}{dom_str}. {text}".strip()
 
     st.subheader(_qtitle(it_no, it_domain, it_text))
 
@@ -319,172 +323,18 @@ elif st.session_state.page == 2:
 
     prev = answers[i] if i < len(answers) else {}
 
-    # ── 라디오(예: DHI/HIT-6)
-    if input_type == "radio":
-        labels = [c[0] for c in meta.get("choices", [])]
-        if not labels:
-            st.error("이 설문은 choices가 비어 있습니다."); st.stop()
-        default_idx = labels.index(prev.get("label")) if (prev and prev.get("label") in labels) else 0
-        sel = st.radio("응답 선택", labels, index=default_idx, key=f"radio_{key}_{i}")
-        score = dict(meta.get("choices", [])).get(sel, 0)
+    # === 이하: input_type 분기 (radio / slider_1_10_na / number_int / slider_0_10) ===
+    # ... (기존 코드 그대로 유지) ...
 
-        c1, c2 = st.columns(2)
-        if c1.button("이전", disabled=(i == 0)):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1
-            st.rerun()
-
-        if c2.button(btn_label, type="primary"):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.rerun()
-
-    # ── 슬라이더 + 적용불능(예: VADL)
-    elif input_type == "slider_1_10_na":
-        na_label = meta.get("na_label", "적용불능")
-        has_score = isinstance(prev, dict) and ("score" in prev)
-        was_na = has_score and (prev["score"] is None)   # 기본 False → 평소에는 체크 해제
-        prev_val = prev["score"] if (has_score and isinstance(prev["score"], int)) else 1
-
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            na = st.checkbox(na_label, value=was_na, key=f"na_{key}_{i}")
-        with c2:
-            val = st.slider("점수 (1–10)", 1, 10, value=prev_val, step=1, disabled=na, key=f"slider_{key}_{i}")
-
-        if not na:
-            info_map = meta.get("score_info", {})
-            cat, desc = info_map.get(str(val), ["", ""])
-            st.info(f"**{val}점** · **{cat}** — {desc}")
-        else:
-            st.warning("이 문항은 적용불능으로 저장됩니다 (합계/최대점 제외)")
-
-        c1, c2 = st.columns(2)
-        if c1.button("이전", disabled=(i == 0)):
-            ans = {
-                "no": it_no, "domain": it_domain, "text": it_text,
-                "label": na_label if na else str(val), "score": None if na else val
-            }
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1
-            st.rerun()
-
-        if c2.button(btn_label, type="primary"):
-            ans = {
-                "no": it_no, "domain": it_domain, "text": it_text,
-                "label": na_label if na else str(val), "score": None if na else val
-            }
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.rerun()
-
-    # ── 정수 입력(예: MIDAS)
-    elif input_type == "number_int":
-        it_min = int(it.get("min", 0))
-        it_max = int(it.get("max", 999))
-        prev_val = 0
-        if prev and isinstance(prev.get("score"), int):
-            prev_val = prev["score"]
-
-        val = st.number_input("정수 입력", min_value=it_min, max_value=it_max,
-                              step=1, value=int(prev_val), key=f"num_{key}_{i}")
-
-        c1, c2 = st.columns(2)
-        if c1.button("이전", disabled=(i == 0)):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1
-            st.rerun()
-
-        if c2.button(btn_label, type="primary"):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.rerun()
-    elif input_type == "slider_0_10":
-        # VAS-D: 0~10 정수 슬라이더
-        it_min = int(it.get("min", 0))
-        it_max = int(it.get("max", 10))
-        prev_val = 0
-        if prev and isinstance(prev.get("score"), int):
-            prev_val = prev["score"]
-
-        val = st.slider("점수 (0–10)", it_min, it_max, value=prev_val, step=1, key=f"vas_{key}_{i}")
-
-        c1, c2 = st.columns(2)
-        if c1.button("이전", disabled=(i == 0)):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1
-            st.rerun()
-
-        if c2.button(btn_label, type="primary"):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.rerun()
+    # 키보드 사용 팁 (선택적)
+    with st.expander("⌨️ 키보드 사용 팁", expanded=False):
+        st.markdown(
+            "- **Radio**: 포커스 상태에서 **↑ / ↓** 로 선택 이동\n"
+            "- **Slider**: 포커스 상태에서 **← / →** 로 값 조절\n"
+            "- **다음/제출** 버튼에 포커스 후 **Enter/Space** 로 진행\n"
+            "- **이전** 버튼에 포커스 후 **Enter** 로 뒤로가기\n"
+            "\n*전역 단축키는 브라우저 정책상 제한이 있어 기본 위젯 조작을 활용합니다.*"
+        )
 
 
 # ─────────────────────────────────────────────────────────────

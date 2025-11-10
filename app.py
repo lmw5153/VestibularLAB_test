@@ -1,26 +1,25 @@
-# app.py — Multi Survey (DHI + VADL) with stable selection & loading spinner
-# - 설문 선택 즉시 2초 로딩 스피너(Cloud 지연/플리커 완화)
-# - multiselect: key만 사용(default 미사용) → 단일 클릭 반영
-# - 참여자 입력(이름/생년월일/성별/기타사항) + CSV/Sheets 저장
-# - VADL '적용불능' 기본 미체크 (과거 응답 시 복원)
-# - 마지막 문항 버튼 라벨: 제출/다음 설문/다음
-# - 규칙 기반 이상탐지 + LLM 추론 옵션 (키 자동 탐지)
-# - YAML 설문 로드(utils.registry) 가정
-import os, sys
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-import os
-import json
-import time
+# app.py — Multi Survey (DHI + VADL) / LLM 키는 Streamlit Secrets에서만 읽기
+# - 설문 선택 단일 클릭 반영 + 2초 로딩 스피너
+# - 참여자 정보
+# - YAML 설문 로드(utils.registry)
+# - DHI/VADL 채점, CSV/Google Sheets 저장
+# - 규칙 기반 이상탐지 + LLM 기반 모순 가능성 요약
+# - LLM API 키는 st.secrets["openai_api_key"]만 사용
+
+import os, sys, time, json
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
-# 내부 모듈 (프로젝트 구조 기준)
+# --- force project root on sys.path (배포 경로 차이 방지) ---
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+# ----------------------------------------------------------
+
+# 내부 모듈
 from utils.registry import list_surveys, load_survey
 from utils.export import build_row, save_df_to_gsheet
 from utils.consistency import make_payload, load_rulebook, eval_rules
@@ -28,22 +27,15 @@ from utils.llm import run_llm_inference
 from scoring.dhi import DHIScorer
 from scoring.vadl import VADLScorer
 
-SCORERS = {
-    "DHI": DHIScorer(),
-    "VADL": VADLScorer(),
-}
-
+SCORERS = {"DHI": DHIScorer(), "VADL": VADLScorer()}
 st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
 
-def _mask_key(k: str, show=4) -> str:
-    if not k:
-        return "(없음)"
-    if len(k) <= show*2:
-        return "*" * len(k)
-    return k[:show] + "•" * 8 + k[-show:]
 
-def _get_openai_key_safe() -> str:
-    # st.secrets 우선 → 환경변수 폴백 (이미 사용중인 _get_openai_key()와 동일한 로직이면 그걸 써도 OK)
+# ─────────────────────────────────────────────────────────────
+# 유틸: LLM 키는 오직 Streamlit Secrets에서만
+# ─────────────────────────────────────────────────────────────
+def get_secret_openai_key() -> str:
+    """Streamlit Secrets에서만 읽는다. 없으면 빈 문자열."""
     try:
         if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
             return st.secrets["openai_api_key"]
@@ -53,135 +45,116 @@ def _get_openai_key_safe() -> str:
                 return gen["openai_api_key"]
     except Exception:
         pass
-    return os.getenv("OPENAI_API_KEY", "")
+    return ""
+
+
+def mask_key(k: str, show: int = 4) -> str:
+    if not k:
+        return "(없음)"
+    return k if len(k) <= show * 2 else k[:show] + "•" * 8 + k[-show:]
+
+
 # ─────────────────────────────────────────────────────────────
-# 안전 보정: YAML에서 누락된 필드(no/domain/text) 자동 채움
+# 안전 보정: YAML items 필수키 보정
 # ─────────────────────────────────────────────────────────────
-def _normalize_items(items):
-    norm = []
+def normalize_items(items):
+    out = []
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             it = {"text": str(it)}
-        no = it.get("no", idx)
-        domain = it.get("domain", "")
-        text = it.get("text", "")
-        rest = {k: v for k, v in it.items() if k not in ("no", "domain", "text")}
-        norm.append({"no": no, "domain": domain, "text": text, **rest})
-    return norm
+        out.append({
+            "no": it.get("no", idx),
+            "domain": it.get("domain", ""),
+            "text": it.get("text", ""),
+            **{k: v for k, v in it.items() if k not in ("no", "domain", "text")}
+        })
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
-# OPENAI API 키 안전 획득 (secrets.toml/환경변수/섹션 폴백)
+# 세션 초기화
 # ─────────────────────────────────────────────────────────────
-def _get_openai_key():
-    key = os.getenv("OPENAI_API_KEY")  # 1) 환경변수
-    try:
-        # 2) secrets 최상위
-        if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
-            return st.secrets["openai_api_key"]
-        # 3) secrets 안의 [general] 섹션 폴백
-        if "general" in st.secrets:
-            gen = st.secrets["general"]
-            if isinstance(gen, dict) and gen.get("openai_api_key"):
-                return gen["openai_api_key"]
-    except Exception:
-        pass
-    return key
-
-
-# ─────────────────────────────────────────────────────────────
-# 세션 상태
-# ─────────────────────────────────────────────────────────────
-def _init_state():
+def init_state():
     defaults = dict(
         page=1,
-        # 참여자 정보
-        participant_id="",
-        participant_name="",
-        participant_birth=None,   # 'YYYY-MM-DD'
-        participant_sex="",
-        participant_notes="",
-        # 설문 진행
-        preset_name="",
-        selected_keys=[],   # ['DHI','VADL', ...]
-        queue=[],           # 진행 순서 복사본
-        curr_idx=0,         # 현재 설문 index
-        answers_map={},     # {key: [ {no,domain,text,label,score}, ... ]}
-        summaries={},       # {key: {total,max,domains}}
-        # 로딩 스피너 제어
+        # 참여자
+        participant_id="", participant_name="",
+        participant_birth=None, participant_sex="", participant_notes="",
+        # 진행
+        preset_name="", selected_keys=[], queue=[], curr_idx=0,
+        answers_map={}, summaries={},
+        # UX
         loading_until=0.0,
     )
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+init_state()
 
-_init_state()
-
-# 사이드바: Google Sheets (옵션)
+# ─────────────────────────────────────────────────────────────
+# 사이드바: Google Sheets + LLM 키 상태
+# ─────────────────────────────────────────────────────────────
 st.sidebar.subheader("Google Sheets 연동(옵션)")
 gs_enable = st.sidebar.checkbox("응답을 Google Sheets로 저장", value=False)
 gs_url = st.sidebar.text_input("스프레드시트 URL", placeholder="https://docs.google.com/...", disabled=not gs_enable)
-gs_ws = st.sidebar.text_input("워크시트 이름", value="responses", disabled=not gs_enable)
-with st.sidebar.expander("🔐 키 상태(마스킹)"):
-    k = _get_openai_key_safe()
-    st.write("OPENAI_API_KEY:", _mask_key(k))
-    st.caption("※ 실제 값은 브라우저로 노출하지 않습니다.")
+gs_ws  = st.sidebar.text_input("워크시트 이름", value="responses", disabled=not gs_enable)
+
+with st.sidebar.expander("🔐 LLM 키 상태(마스킹)"):
+    api_key = get_secret_openai_key()
+    st.write("OPENAI_API_KEY:", mask_key(api_key))
+    st.caption("※ 키는 secrets에만 저장되며, 브라우저로 원문은 노출하지 않습니다.")
+
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 1 — Main: 설문 선택/프리셋/참여자 입력/시작 (지연 로딩 스피너)
+# PAGE 1 — 메인(설문 선택/프리셋/참여자/시작)
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
     st.title("🧠 인지 설문 플랫폼 — Multi Survey")
-    st.write("여러 설문을 동시에 선택하고 프리셋으로 저장해 다음에 쉽게 불러올 수 있습니다.")
 
     metas = list_surveys()
     key_to_title = {m["key"]: m["title"] for m in metas}
     all_keys = [m["key"] for m in metas]
 
-    # 위젯 렌더 전: 현재 옵션에 없는 값 제거(플리커 방지)
+    # 옵션에 없는 값 제거
     st.session_state.selected_keys = [k for k in st.session_state.selected_keys if k in all_keys]
 
-    # 프리셋 저장/불러오기
+    # 프리셋
     presets_path = Path("data/presets.json")
+    presets = {}
     if presets_path.exists():
         try:
             presets = json.load(open(presets_path, "r", encoding="utf-8"))
         except Exception:
             presets = {}
-    else:
-        presets = {}
 
-    cols = st.columns([2, 1])
-    with cols[0]:
+    left, right = st.columns([2, 1])
+    with left:
         st.subheader("설문 선택")
 
-        # 선택 변경 시 2초 로딩 예약
-        def _on_select_changed():
-            st.session_state.loading_until = time.time() + 2.0  # 2초
+        def on_select_change():
+            st.session_state.loading_until = time.time() + 2.0
 
-        # multiselect에는 key만 주고 default는 주지 않음(단일 클릭 반영)
         st.multiselect(
             "실시할 설문을 선택하세요",
             options=all_keys,
             format_func=lambda k: key_to_title.get(k, k),
             key="selected_keys",
-            on_change=_on_select_changed,
+            on_change=on_select_change,
         )
 
-        # 예약된 로딩이 남아 있으면 스피너 표시 후 안정적으로 재구성
-        remaining = st.session_state.loading_until - time.time()
-        if remaining > 0:
+        remain = st.session_state.loading_until - time.time()
+        if remain > 0:
             with st.spinner("설문 구성을 불러오는 중..."):
-                time.sleep(min(remaining, 2.0))
+                time.sleep(min(remain, 2.0))
             st.session_state.loading_until = 0.0
             st.rerun()
 
         with st.expander("프리셋 관리", expanded=False):
-            preset_col1, preset_col2 = st.columns([3, 1])
-            with preset_col1:
+            c1, c2 = st.columns([3, 1])
+            with c1:
                 preset_name = st.text_input("프리셋 이름", value=st.session_state.preset_name)
-            with preset_col2:
+            with c2:
                 if st.button("저장"):
                     if preset_name.strip():
                         presets[preset_name.strip()] = st.session_state.selected_keys
@@ -191,80 +164,58 @@ if st.session_state.page == 1:
                         st.session_state.preset_name = preset_name.strip()
                     else:
                         st.warning("프리셋 이름을 입력하세요.")
-
             if presets:
                 pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
                 if pick != "(선택)":
                     if st.button("프리셋 적용"):
                         st.session_state.selected_keys = [k for k in presets[pick] if k in all_keys]
                         st.session_state.preset_name = pick
-                        # 프리셋 적용 UX 통일: 로딩 예약
                         st.session_state.loading_until = time.time() + 2.0
                         st.success(f"프리셋 '{pick}' 적용")
                         st.rerun()
 
-    with cols[1]:
+    with right:
         st.subheader("참여자/동의")
-
-        # 이름
         name = st.text_input("이름", value=st.session_state.participant_name)
-
-        # 생년월일
         if st.session_state.participant_birth:
             _birth_date = pd.to_datetime(st.session_state.participant_birth).date()
             dob = st.date_input("생년월일", value=_birth_date, key="dob")
         else:
             dob = st.date_input("생년월일", key="dob")
-
-        # 성별
-        sex_options = ["", "남", "여", "기타"]
-        try:
-            sex_idx = sex_options.index(st.session_state.participant_sex or "")
-        except ValueError:
-            sex_idx = 0
-        sex = st.selectbox("성별", options=sex_options, index=sex_idx)
-
-        # 기타사항
-        notes = st.text_area("기타사항", value=st.session_state.participant_notes, height=90,
-                             placeholder="알레르기, 복용약, 주의사항 등 필요 시 기입")
-
-        # 연구 ID (선택)
+        sex = st.selectbox("성별", ["", "남", "여", "기타"], index=["","남","여","기타"].index(st.session_state.participant_sex or ""))
+        notes = st.text_area("기타사항", value=st.session_state.participant_notes, height=90)
         pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
-
         agree = st.checkbox("개인정보 이용에 동의합니다.")
-        start_disabled = (not agree) or (not name.strip()) or (len(st.session_state.selected_keys) == 0)
 
+        start_disabled = (not agree) or (not name.strip()) or (len(st.session_state.selected_keys) == 0)
         if st.button("검사 시작", type="primary", disabled=start_disabled):
             st.session_state.participant_name = name.strip()
-            st.session_state.participant_birth = (dob.isoformat() if dob else None)
+            st.session_state.participant_birth = dob.isoformat() if dob else None
             st.session_state.participant_sex = sex
             st.session_state.participant_notes = notes.strip()
             st.session_state.participant_id = pid.strip()
-
             st.session_state.queue = list(st.session_state.selected_keys)
             st.session_state.curr_idx = 0
             st.session_state.answers_map = {}
             st.session_state.summaries = {}
             st.session_state.page = 2
-            # UX 통일: 시작 시에도 짧은 로딩(선택)
             st.session_state.loading_until = time.time() + 1.0
             st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 2 — 설문 진행(순차)
+# PAGE 2 — 설문 진행
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 2:
     queue = st.session_state.queue
     idx = st.session_state.curr_idx
-
     if idx >= len(queue):
         st.session_state.page = 3
         st.rerun()
 
     key = queue[idx]
-    meta = load_survey(key)  # {key,title,input_type,scoring,choices?,na_label?,items:[]}
-    meta["items"] = _normalize_items(meta.get("items", []))
+    meta = load_survey(key)
+    meta["items"] = normalize_items(meta.get("items", []))
 
     items = meta["items"]
     input_type = meta.get("input_type", "radio")
@@ -272,13 +223,11 @@ elif st.session_state.page == 2:
     st.title(meta["title"])
     st.caption(f"설문 {idx+1} / {len(queue)}")
 
-    # 설문별 응답 초기화
     answers = st.session_state.answers_map.get(key, [])
     if not answers:
         st.session_state.answers_map[key] = []
         answers = st.session_state.answers_map[key]
 
-    # 현재 문항 인덱스
     if f"i_{key}" not in st.session_state:
         st.session_state[f"i_{key}"] = 0
     i = st.session_state[f"i_{key}"]
@@ -293,22 +242,17 @@ elif st.session_state.page == 2:
     it_text = it.get("text", "")
     st.subheader(f"({it_domain}) {it_text}")
 
-    # 버튼 라벨 로직
-    is_last_item   = (i == n - 1)
+    is_last_item = (i == n - 1)
     is_last_survey = (st.session_state.curr_idx == len(st.session_state.queue) - 1)
     btn_label = "제출" if (is_last_item and is_last_survey) else ("다음 설문" if is_last_item else "다음")
 
-    # 이전 답변 복구
     prev = answers[i] if i < len(answers) else {}
 
     if input_type == "radio":
         labels = [c[0] for c in meta.get("choices", [])]
         if not labels:
-            st.error("이 설문은 choices가 비어 있습니다.")
-            st.stop()
-        default_idx = 0
-        if prev and prev.get("label") in labels:
-            default_idx = labels.index(prev["label"])
+            st.error("이 설문은 choices가 비어 있습니다."); st.stop()
+        default_idx = labels.index(prev.get("label")) if (prev and prev.get("label") in labels) else 0
         sel = st.radio("응답 선택", labels, index=default_idx, key=f"radio_{key}_{i}")
         score = dict(meta.get("choices", [])).get(sel, 0)
 
@@ -317,8 +261,7 @@ elif st.session_state.page == 2:
             ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1
-            st.rerun()
+            st.session_state[f"i_{key}"] -= 1; st.rerun()
 
         if c2.button(btn_label, type="primary"):
             ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
@@ -329,10 +272,8 @@ elif st.session_state.page == 2:
                 scorer = SCORERS.get(key)
                 summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
                 st.session_state.summaries[key] = summary
-
                 if is_last_survey:
-                    st.session_state.curr_idx += 1
-                    st.session_state.page = 3
+                    st.session_state.curr_idx += 1; st.session_state.page = 3
                 else:
                     st.session_state.curr_idx += 1
                     next_key = st.session_state.queue[st.session_state.curr_idx]
@@ -340,15 +281,13 @@ elif st.session_state.page == 2:
                     st.session_state.page = 2
             else:
                 st.session_state[f"i_{key}"] += 1
-
             st.rerun()
 
     elif input_type == "slider_1_10_na":
         na_label = meta.get("na_label", "적용불능")
-        # 기본 미체크, 과거 응답만 복원
-        has_score_key = isinstance(prev, dict) and ("score" in prev)
-        was_na = has_score_key and (prev["score"] is None)
-        prev_val = prev["score"] if (has_score_key and isinstance(prev["score"], int)) else 1
+        has_score = isinstance(prev, dict) and ("score" in prev)
+        was_na = has_score and (prev["score"] is None)
+        prev_val = prev["score"] if (has_score and isinstance(prev["score"], int)) else 1
 
         c1, c2 = st.columns([1, 2])
         with c1:
@@ -365,26 +304,13 @@ elif st.session_state.page == 2:
 
         c1, c2 = st.columns(2)
         if c1.button("이전", disabled=(i == 0)):
-            ans = {
-                "no": it_no,
-                "domain": it_domain,
-                "text": it_text,
-                "label": na_label if na else str(val),
-                "score": None if na else val,
-            }
+            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": na_label if na else str(val), "score": None if na else val}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1
-            st.rerun()
+            st.session_state[f"i_{key}"] -= 1; st.rerun()
 
         if c2.button(btn_label, type="primary"):
-            ans = {
-                "no": it_no,
-                "domain": it_domain,
-                "text": it_text,
-                "label": na_label if na else str(val),
-                "score": None if na else val,
-            }
+            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": na_label if na else str(val), "score": None if na else val}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
 
@@ -392,10 +318,8 @@ elif st.session_state.page == 2:
                 scorer = SCORERS.get(key)
                 summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
                 st.session_state.summaries[key] = summary
-
                 if is_last_survey:
-                    st.session_state.curr_idx += 1
-                    st.session_state.page = 3
+                    st.session_state.curr_idx += 1; st.session_state.page = 3
                 else:
                     st.session_state.curr_idx += 1
                     next_key = st.session_state.queue[st.session_state.curr_idx]
@@ -403,31 +327,26 @@ elif st.session_state.page == 2:
                     st.session_state.page = 2
             else:
                 st.session_state[f"i_{key}"] += 1
-
             st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 3 — 결과/비교/다운로드/이상탐지 + LLM 옵션
+# PAGE 3 — 결과/다운로드/이상탐지 + LLM
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 3:
     st.title("결과 요약 & 비교")
     pid = st.session_state.participant_id
     ts = datetime.now().isoformat(timespec="seconds")
 
-    # 카드
     cols = st.columns(len(st.session_state.summaries) or 1)
     for c, (k, s) in zip(cols, st.session_state.summaries.items()):
         with c:
             st.subheader(k)
-            if s.get("max") is not None:
-                st.metric("총점", s["total"], delta=f"/ {s['max']}")
-            else:
-                st.metric("총점", s["total"])
+            if s.get("max") is not None: st.metric("총점", s["total"], delta=f"/ {s['max']}")
+            else: st.metric("총점", s["total"])
             for dkey, dval in s.get("domains", {}).items():
                 st.caption(f"{dkey}: {dval}")
 
-    # 참여자 정보
     with st.expander("참여자 정보", expanded=False):
         st.write(f"**이름**: {st.session_state.participant_name or '-'}")
         st.write(f"**생년월일**: {st.session_state.participant_birth or '-'}")
@@ -435,30 +354,20 @@ elif st.session_state.page == 3:
         st.write(f"**기타사항**: {st.session_state.participant_notes or '-'}")
         st.write(f"**연구 ID**: {pid or '-'}")
 
-    # 설문별 raw 응답표
     with st.expander("설문별 응답표"):
         for k, answers in st.session_state.answers_map.items():
             st.markdown(f"### {k}")
-            df = pd.DataFrame(
-                [
-                    {
-                        "no": a.get("no", idx + 1),
-                        "domain": a.get("domain", ""),
-                        "question": a.get("text", ""),
-                        "response_label": a.get("label", ""),
-                        "response_score": ("" if a.get("score") is None else a.get("score")),
-                    }
-                    for idx, a in enumerate(answers)
-                ]
-            )
+            df = pd.DataFrame([
+                {"no": a.get("no", i+1), "domain": a.get("domain",""),
+                 "question": a.get("text",""), "response_label": a.get("label",""),
+                 "response_score": ("" if a.get("score") is None else a.get("score"))}
+                for i, a in enumerate(answers)
+            ])
             st.dataframe(df, use_container_width=True)
 
-    # 통합 CSV 행
-    per_survey_summaries = st.session_state.summaries
-    per_survey_raw = st.session_state.answers_map
-    row = build_row(ts, pid, st.session_state.preset_name, per_survey_summaries, per_survey_raw)
-
-    # 참여자 기본정보 포함
+    per_summ = st.session_state.summaries
+    per_raw  = st.session_state.answers_map
+    row = build_row(ts, pid, st.session_state.preset_name, per_summ, per_raw)
     row.update({
         "name": st.session_state.participant_name,
         "birth": st.session_state.participant_birth or "",
@@ -467,17 +376,10 @@ elif st.session_state.page == 3:
     })
 
     df_out = pd.DataFrame([row])
+    buf = StringIO(); df_out.to_csv(buf, index=False, encoding="utf-8-sig")
+    st.download_button("📥 통합 CSV 다운로드", data=buf.getvalue().encode("utf-8-sig"),
+                       file_name=f"{ts.replace(':','-')}_summary.csv", mime="text/csv")
 
-    csv_buf = StringIO()
-    df_out.to_csv(csv_buf, index=False, encoding="utf-8-sig")
-    st.download_button(
-        "📥 통합 CSV 다운로드",
-        data=csv_buf.getvalue().encode("utf-8-sig"),
-        file_name=f"{ts.replace(':','-')}_summary.csv",
-        mime="text/csv",
-    )
-
-    # Google Sheets 저장(옵션)
     if gs_enable and gs_url:
         try:
             save_df_to_gsheet(df_out, gs_url, gs_ws)
@@ -487,116 +389,48 @@ elif st.session_state.page == 3:
 
     st.divider()
 
-    # 규칙 기반 이상탐지
     st.subheader("이상 응답 탐지 (규칙 기반·경량)")
-    payload = make_payload(per_survey_raw, per_survey_summaries)
+    payload = make_payload(per_raw, per_summ)
     rulebook = load_rulebook(Path("rules/rulebook_v1.json"))
     flags = eval_rules(payload, rulebook)
 
     if not flags:
         st.success("모순 신호가 없습니다.")
-        row["is_consistent"] = True
-        row["flags_json"] = "[]"
+        row["is_consistent"] = True; row["flags_json"] = "[]"
     else:
         for f in flags:
             st.warning(f"**{f['id']}** · {f['reason']}  \n제안: {', '.join(f.get('suggestion', []))}")
-        row["is_consistent"] = False
-        row["flags_json"] = json.dumps(flags, ensure_ascii=False)
-
-        # 갱신 다운로드
-        df_out = pd.DataFrame([row])
-        csv_buf = StringIO()
-        df_out.to_csv(csv_buf, index=False, encoding="utf-8-sig")
-        st.download_button(
-            "📥 통합 CSV(플래그 포함) 재다운로드",
-            data=csv_buf.getvalue().encode("utf-8-sig"),
-            file_name=f"{ts.replace(':','-')}_summary_flags.csv",
-            mime="text/csv",
-        )
-        if gs_enable and gs_url:
-            try:
-                save_df_to_gsheet(df_out, gs_url, gs_ws)
-                st.success("Google Sheets 저장 완료 (플래그 포함)")
-            except Exception as e:
-                st.error(f"Google Sheets 저장 실패: {e}")
+        row["is_consistent"] = False; row["flags_json"] = json.dumps(flags, ensure_ascii=False)
 
     st.divider()
 
-    # LLM 기반 이상탐지(옵션)
+    # ── LLM 기반 모순 가능성 요약 (secrets 키만 사용)
     st.subheader("LLM 기반 이상응답 추론 (모순 가능성 제시)")
-    llm_on = st.checkbox("LLM 사용 (진단 아님, 모순 가능성만 요약)", value=False)
-    if llm_on and not _get_openai_key():
-        st.info("🔑 OPENAI_API_KEY가 설정되지 않았습니다. 환경변수 또는 Streamlit Secrets에 키를 넣어주세요.")
-    llm_model = st.selectbox("모델", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"], index=0, disabled=not llm_on)
+    llm_on = st.checkbox("LLM 사용", value=False)
+    llm_model = st.selectbox("모델", ["gpt-4o-mini", "gpt-4o"], index=0, disabled=not llm_on)
 
     if llm_on and st.button("LLM으로 모순 가능성 분석"):
-        ai = run_llm_inference(
-            per_survey_raw=per_survey_raw,
-            payload=payload,
-            model=llm_model,
-            api_key=_get_openai_key()
-        )
-
-        tri = ai.get("triage", "low")
-        if tri == "high":
-            st.error("전반 주의도: HIGH")
-        elif tri == "medium":
-            st.warning("전반 주의도: MEDIUM")
+        key = get_secret_openai_key()
+        if not key:
+            st.info("🔑 Secrets에 openai_api_key가 없습니다. App Settings → Secrets에 등록하세요.")
         else:
-            st.info("전반 주의도: LOW")
-
-        if ai.get("summary_kor"):
-            st.markdown("**요약**")
-            st.write(ai["summary_kor"])
-
-        flags_ai = ai.get("flags", [])
-        if flags_ai:
-            st.markdown("**지적된 모순 가능성 (LLM)**")
-            for f in flags_ai:
-                rid = f.get("id", "Lx")
-                sev = f.get("severity", "low")
-                rsn = f.get("reason", "")
-                evd = f.get("evidence", []) or []
-                msg = f"**{rid}** · severity={sev} — {rsn}"
-                if sev == "high": st.error(msg)
-                elif sev == "medium": st.warning(msg)
-                else: st.info(msg)
-                if evd:
-                    st.caption("근거: " + "; ".join(evd[:6]))
-
-        fus = ai.get("followups", [])
-        if fus:
-            st.markdown("**재확인 질문 제안**")
-            for q in fus[:5]:
-                st.write("• " + q)
-
-        # CSV/Sheets에 LLM 결과 컬럼 추가
-        row["ai_triage"] = tri
-        row["ai_summary_kor"] = ai.get("summary_kor", "")
-        row["ai_flags_json"] = json.dumps(flags_ai, ensure_ascii=False)
-        row["ai_followups_json"] = json.dumps(fus, ensure_ascii=False)
-
-        df_out = pd.DataFrame([row])
-        csv_buf = StringIO(); df_out.to_csv(csv_buf, index=False, encoding="utf-8-sig")
-        st.download_button(
-            "📥 통합 CSV(LLM 결과 포함) 재다운로드",
-            data=csv_buf.getvalue().encode("utf-8-sig"),
-            file_name=f"{ts.replace(':','-')}_summary_llm.csv",
-            mime="text/csv",
-        )
-        if gs_enable and gs_url:
-            try:
-                save_df_to_gsheet(df_out, gs_url, gs_ws)
-                st.success("Google Sheets 저장 완료 (LLM 결과 포함)")
-            except Exception as e:
-                st.error(f"Google Sheets 저장 실패: {e}")
+            ai = run_llm_inference(per_survey_raw=per_raw, payload=payload, model=llm_model, api_key=key)
+            tri = ai.get("triage", "low")
+            st.write("전반 주의도:", tri.upper())
+            if ai.get("summary_kor"):
+                st.markdown("**요약**"); st.write(ai["summary_kor"])
+            if ai.get("flags"):
+                st.markdown("**지적된 모순 가능성**")
+                for f in ai["flags"]:
+                    st.write(f"- {f.get('id','Lx')}: {f.get('reason','')}")
+            if ai.get("followups"):
+                st.markdown("**재확인 질문 제안**")
+                for q in ai["followups"][:5]:
+                    st.write("• " + q)
 
     st.divider()
     c1, c2 = st.columns(2)
     if c1.button("처음으로"):
-        st.session_state.page = 1
-        st.rerun()
+        st.session_state.page = 1; st.rerun()
     if c2.button("다시 진행"):
-        st.session_state.page = 2
-        st.session_state.curr_idx = 0
-        st.rerun()
+        st.session_state.page = 2; st.session_state.curr_idx = 0; st.rerun()

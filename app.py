@@ -295,28 +295,63 @@ if st.session_state.page == 1:
 elif st.session_state.page == 2:
     # Inject global keyboard hook (Space/Arrows/Z) → ?kb=action
     components.html("""
+    <style>
+      /* 화면에 보이지 않는 키보드 트랩 */
+      #kbtrap {
+        position: fixed;
+        opacity: 0;
+        pointer-events: none;
+        width: 1px;
+        height: 1px;
+        left: 0; top: 0;
+      }
+    </style>
+    <input id="kbtrap" type="text" autofocus />
+    
     <script>
     (function(){
+      const trap = document.getElementById('kbtrap');
+      if (trap) {
+        // 페이지 진입 시/리렌더 시 자동 포커스 재시도
+        function refocusTrap(){
+          try { trap.focus({preventScroll:true}); } catch(e){}
+        }
+        refocusTrap();
+        // 혹시 포커스가 벗어났으면 살짝 뒤에 재포커스
+        document.addEventListener('visibilitychange', refocusTrap);
+        window.addEventListener('load', () => setTimeout(refocusTrap, 50));
+      }
+    
+      // 입력 위젯 포커스면 방해하지 않되, kbtrap에 포커스일 땐 전역 키 처리 허용
       function isFormFocused(){
         const el = document.activeElement;
-        if(!el) return false;
+        if (!el) return false;
         const tag = el.tagName;
+        const id  = el.id || '';
+        if (id === 'kbtrap') return false;                 // ← 우리 트랩은 예외
         return ['INPUT','TEXTAREA','SELECT','BUTTON'].includes(tag);
       }
+    
       window.addEventListener('keydown', function(e){
-        if(isFormFocused()) return;
+        // 전역 단축키: Space/Arrows/Z
         let action = null;
-        if(e.code === 'Space'){ action='next'; e.preventDefault(); }
-        else if(e.key === 'z' || e.key === 'Z'){ action='prev'; }
-        else if(e.key === 'ArrowUp'){ action='up'; }
-        else if(e.key === 'ArrowDown'){ action='down'; }
-        else if(e.key === 'ArrowLeft'){ action='left'; }
-        else if(e.key === 'ArrowRight'){ action='right'; }
-        if(action){
-          const url = new URL(window.location.href);
-          url.searchParams.set('kb', action);
-          window.location.href = url.toString();
-        }
+    
+        if (e.code === 'Space'){ action='next'; e.preventDefault(); }
+        else if (e.key === 'z' || e.key === 'Z'){ action='prev'; }
+        else if (e.key === 'ArrowUp'){ action='up'; }
+        else if (e.key === 'ArrowDown'){ action='down'; }
+        else if (e.key === 'ArrowLeft'){ action='left'; }
+        else if (e.key === 'ArrowRight'){ action='right'; }
+    
+        if (!action) return;
+    
+        // 위젯에 직접 포커스가 있을 때는 그 위젯의 기본 키보드 동작을 존중
+        if (isFormFocused()) return;
+    
+        // 쿼리 파라미터로 액션 전달 → Streamlit rerun
+        const url = new URL(window.location.href);
+        url.searchParams.set('kb', action);
+        window.location.href = url.toString();
       }, {passive:false});
     })();
     </script>

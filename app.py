@@ -1,9 +1,9 @@
-# app.py — Multi Survey (DHI + VADL)
+# app.py — Multi Survey (DHI + VADL) with robust selection & YAML surveys
+# - 설문 선택 중복/플리커 방지 (선택값 정리)
 # - 참여자 입력(이름/생년월일/성별/기타사항) + CSV/Sheets 저장
-# - 안전 보정(문항 no/domain/text 누락)
-# - VADL '적용불능' 기본 미체크 (기존 응답 시에만 복원)
+# - VADL '적용불능' 기본 미체크 (과거 응답 시 복원)
 # - 마지막 문항 버튼 라벨: 제출/다음 설문/다음
-# - 규칙 기반 이상탐지 + LLM 추론형 옵션 (키 자동 탐지)
+# - 규칙 기반 이상탐지 + LLM 추론 옵션 (키 자동 탐지)
 
 import os
 import json
@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# 내부 모듈 (프로젝트 구조 기준)
+# 내부 모듈
 from utils.registry import list_surveys, load_survey
 from utils.export import build_row, save_df_to_gsheet
 from utils.consistency import make_payload, load_rulebook, eval_rules
@@ -28,6 +28,7 @@ SCORERS = {
 }
 
 st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
+
 
 # ─────────────────────────────────────────────────────────────
 # 안전 보정: YAML에서 누락된 필드(no/domain/text) 자동 채움
@@ -44,8 +45,9 @@ def _normalize_items(items):
         norm.append({"no": no, "domain": domain, "text": text, **rest})
     return norm
 
+
 # ─────────────────────────────────────────────────────────────
-# OPENAI API 키 안전 획득 (secrets.toml/환경변수/섹션 폴백 모두 지원)
+# OPENAI API 키 안전 획득 (secrets.toml/환경변수/섹션 폴백)
 # ─────────────────────────────────────────────────────────────
 def _get_openai_key():
     key = os.getenv("OPENAI_API_KEY")  # 1) 환경변수
@@ -62,6 +64,7 @@ def _get_openai_key():
         pass
     return key
 
+
 # ─────────────────────────────────────────────────────────────
 # 세션 상태
 # ─────────────────────────────────────────────────────────────
@@ -71,7 +74,7 @@ def _init_state():
         # 참여자 정보
         participant_id="",
         participant_name="",
-        participant_birth=None,   # 'YYYY-MM-DD' 문자열
+        participant_birth=None,   # 'YYYY-MM-DD'
         participant_sex="",
         participant_notes="",
         # 설문 진행
@@ -86,6 +89,7 @@ def _init_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
+
 _init_state()
 
 # 사이드바: Google Sheets (옵션)
@@ -94,20 +98,22 @@ gs_enable = st.sidebar.checkbox("응답을 Google Sheets로 저장", value=False
 gs_url = st.sidebar.text_input("스프레드시트 URL", placeholder="https://docs.google.com/...", disabled=not gs_enable)
 gs_ws = st.sidebar.text_input("워크시트 이름", value="responses", disabled=not gs_enable)
 
+
 # ─────────────────────────────────────────────────────────────
 # PAGE 1 — Main: 설문 선택/프리셋/참여자 입력/시작
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
-    st.title("🧠 Vestibular LAB 설문 플랫폼")
-    st.write("전북대 병원 신경과 Vestibular LAB")
-    st.write("LLM 생성형 모델을 이용하여 이상 응답을 파악합니다.")
-
+    st.title("🧠 인지 설문 플랫폼 — Multi Survey")
     st.write("여러 설문을 동시에 선택하고 프리셋으로 저장해 다음에 쉽게 불러올 수 있습니다.")
 
     metas = list_surveys()
     key_to_title = {m["key"]: m["title"] for m in metas}
+    all_keys = [m["key"] for m in metas]
 
-    # 프리셋 저장/불러오기 (로컬 JSON)
+    # 기존 선택에서 현재 목록에 없는 키 제거 (플리커 방지 1)
+    st.session_state.selected_keys = [k for k in st.session_state.selected_keys if k in all_keys]
+
+    # 프리셋 저장/불러오기
     presets_path = Path("data/presets.json")
     if presets_path.exists():
         presets = json.load(open(presets_path, "r", encoding="utf-8"))
@@ -117,13 +123,14 @@ if st.session_state.page == 1:
     cols = st.columns([2, 1])
     with cols[0]:
         st.subheader("설문 선택")
-        all_keys = [m["key"] for m in metas]
         sel = st.multiselect(
             "실시할 설문을 선택하세요",
             options=all_keys,
             format_func=lambda k: key_to_title.get(k, k),
             default=st.session_state.selected_keys,
         )
+        # 선택 직후 정리(중복 제거 + 유효키만 유지) — 플리커 방지 2
+        sel = list(dict.fromkeys([k for k in sel if k in all_keys]))
         st.session_state.selected_keys = sel
 
         with st.expander("프리셋 관리", expanded=False):
@@ -132,17 +139,23 @@ if st.session_state.page == 1:
                 preset_name = st.text_input("프리셋 이름", value=st.session_state.preset_name)
             with preset_col2:
                 if st.button("저장"):
-                    presets[preset_name] = sel
-                    presets_path.parent.mkdir(parents=True, exist_ok=True)
-                    json.dump(presets, open(presets_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-                    st.success("프리셋 저장 완료")
-                    st.session_state.preset_name = preset_name
+                    if preset_name.strip():
+                        presets[preset_name.strip()] = st.session_state.selected_keys
+                        presets_path.parent.mkdir(parents=True, exist_ok=True)
+                        json.dump(presets, open(presets_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+                        st.success("프리셋 저장 완료")
+                        st.session_state.preset_name = preset_name.strip()
+                    else:
+                        st.warning("프리셋 이름을 입력하세요.")
+
             if presets:
                 pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
-                if pick != "(선택)" and st.button("프리셋 적용"):
-                    st.session_state.selected_keys = presets[pick]
-                    st.session_state.preset_name = pick
-                    st.success(f"프리셋 '{pick}' 적용")
+                if pick != "(선택)":
+                    if st.button("프리셋 적용"):
+                        st.session_state.selected_keys = [k for k in presets[pick] if k in all_keys]
+                        st.session_state.preset_name = pick
+                        st.success(f"프리셋 '{pick}' 적용")
+                        st.rerun()  # 즉시 재구성
 
     with cols[1]:
         st.subheader("참여자/동의")
@@ -150,7 +163,7 @@ if st.session_state.page == 1:
         # 이름
         name = st.text_input("이름", value=st.session_state.participant_name)
 
-        # 생년월일 (값이 없으면 value 인자 없이 렌더)
+        # 생년월일
         if st.session_state.participant_birth:
             _birth_date = pd.to_datetime(st.session_state.participant_birth).date()
             dob = st.date_input("생년월일", value=_birth_date, key="dob")
@@ -189,6 +202,7 @@ if st.session_state.page == 1:
             st.session_state.page = 2
             st.rerun()
 
+
 # ─────────────────────────────────────────────────────────────
 # PAGE 2 — 설문 진행(순차)
 # ─────────────────────────────────────────────────────────────
@@ -202,7 +216,6 @@ elif st.session_state.page == 2:
 
     key = queue[idx]
     meta = load_survey(key)  # {key,title,input_type,scoring,choices?,na_label?,items:[]}
-    # 🔒 안전 보정: 문항 누락 필드 자동 채움
     meta["items"] = _normalize_items(meta.get("items", []))
 
     items = meta["items"]
@@ -211,7 +224,7 @@ elif st.session_state.page == 2:
     st.title(meta["title"])
     st.caption(f"설문 {idx+1} / {len(queue)}")
 
-    # 문항 상태 초기화
+    # 설문별 응답 초기화
     answers = st.session_state.answers_map.get(key, [])
     if not answers:
         st.session_state.answers_map[key] = []
@@ -232,7 +245,7 @@ elif st.session_state.page == 2:
     it_text = it.get("text", "")
     st.subheader(f"({it_domain}) {it_text}")
 
-    # 공통 버튼 라벨 로직
+    # 버튼 라벨 로직
     is_last_item   = (i == n - 1)
     is_last_survey = (st.session_state.curr_idx == len(st.session_state.queue) - 1)
     btn_label = "제출" if (is_last_item and is_last_survey) else ("다음 설문" if is_last_item else "다음")
@@ -265,30 +278,26 @@ elif st.session_state.page == 2:
             else: answers.append(ans)
 
             if is_last_item:
-                # 설문 채점
                 scorer = SCORERS.get(key)
                 summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
                 st.session_state.summaries[key] = summary
 
                 if is_last_survey:
-                    # 모든 설문 완료 → 결과 페이지
                     st.session_state.curr_idx += 1
                     st.session_state.page = 3
                 else:
-                    # 다음 설문 이어서 진행
                     st.session_state.curr_idx += 1
                     next_key = st.session_state.queue[st.session_state.curr_idx]
                     st.session_state[f"i_{next_key}"] = 0
                     st.session_state.page = 2
             else:
-                # 같은 설문 내 다음 문항
                 st.session_state[f"i_{key}"] += 1
 
             st.rerun()
 
     elif input_type == "slider_1_10_na":
         na_label = meta.get("na_label", "적용불능")
-        # 이전 상태 복원 — 키 존재까지 확인하여 기본은 미체크
+        # 기본 미체크, 과거 응답만 복원
         has_score_key = isinstance(prev, dict) and ("score" in prev)
         was_na = has_score_key and (prev["score"] is None)
         prev_val = prev["score"] if (has_score_key and isinstance(prev["score"], int)) else 1
@@ -349,6 +358,7 @@ elif st.session_state.page == 2:
 
             st.rerun()
 
+
 # ─────────────────────────────────────────────────────────────
 # PAGE 3 — 결과/비교/다운로드/이상탐지 + LLM 옵션
 # ─────────────────────────────────────────────────────────────
@@ -357,7 +367,7 @@ elif st.session_state.page == 3:
     pid = st.session_state.participant_id
     ts = datetime.now().isoformat(timespec="seconds")
 
-    # 카드 렌더링
+    # 카드
     cols = st.columns(len(st.session_state.summaries) or 1)
     for c, (k, s) in zip(cols, st.session_state.summaries.items()):
         with c:
@@ -369,7 +379,7 @@ elif st.session_state.page == 3:
             for dkey, dval in s.get("domains", {}).items():
                 st.caption(f"{dkey}: {dval}")
 
-    # (옵션) 참여자 요약 정보
+    # 참여자 정보
     with st.expander("참여자 정보", expanded=False):
         st.write(f"**이름**: {st.session_state.participant_name or '-'}")
         st.write(f"**생년월일**: {st.session_state.participant_birth or '-'}")
@@ -395,12 +405,12 @@ elif st.session_state.page == 3:
             )
             st.dataframe(df, use_container_width=True)
 
-    # 통합 CSV 행 구성
+    # 통합 CSV 행
     per_survey_summaries = st.session_state.summaries
     per_survey_raw = st.session_state.answers_map
     row = build_row(ts, pid, st.session_state.preset_name, per_survey_summaries, per_survey_raw)
 
-    # ⬇️ 참여자 기본정보를 CSV에도 포함
+    # 참여자 기본정보 포함
     row.update({
         "name": st.session_state.participant_name,
         "birth": st.session_state.participant_birth or "",
@@ -419,7 +429,7 @@ elif st.session_state.page == 3:
         mime="text/csv",
     )
 
-    # (옵션) Google Sheets 저장
+    # Google Sheets 저장(옵션)
     if gs_enable and gs_url:
         try:
             save_df_to_gsheet(df_out, gs_url, gs_ws)
@@ -429,7 +439,7 @@ elif st.session_state.page == 3:
 
     st.divider()
 
-    # ── 규칙 기반 이상탐지(경량)
+    # 규칙 기반 이상탐지
     st.subheader("이상 응답 탐지 (규칙 기반·경량)")
     payload = make_payload(per_survey_raw, per_survey_summaries)
     rulebook = load_rulebook(Path("rules/rulebook_v1.json"))
@@ -445,7 +455,7 @@ elif st.session_state.page == 3:
         row["is_consistent"] = False
         row["flags_json"] = json.dumps(flags, ensure_ascii=False)
 
-        # 갱신 저장/다운로드 갱신
+        # 갱신 다운로드
         df_out = pd.DataFrame([row])
         csv_buf = StringIO()
         df_out.to_csv(csv_buf, index=False, encoding="utf-8-sig")
@@ -464,11 +474,11 @@ elif st.session_state.page == 3:
 
     st.divider()
 
-    # === LLM 기반 이상응답 추론(옵션) ======================================
+    # LLM 기반 이상탐지(옵션)
     st.subheader("LLM 기반 이상응답 추론 (모순 가능성 제시)")
     llm_on = st.checkbox("LLM 사용 (진단 아님, 모순 가능성만 요약)", value=False)
     if llm_on and not _get_openai_key():
-        st.info("🔑 OPENAI_API_KEY가 설정되지 않았습니다. 환경변수 또는 .streamlit/secrets.toml에 키를 넣어주세요.")
+        st.info("🔑 OPENAI_API_KEY가 설정되지 않았습니다. 환경변수 또는 Streamlit Secrets에 키를 넣어주세요.")
     llm_model = st.selectbox("모델", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"], index=0, disabled=not llm_on)
 
     if llm_on and st.button("LLM으로 모순 가능성 분석"):
@@ -476,7 +486,7 @@ elif st.session_state.page == 3:
             per_survey_raw=per_survey_raw,
             payload=payload,
             model=llm_model,
-            api_key=_get_openai_key()  # ← secrets.toml 없어도 안전
+            api_key=_get_openai_key()
         )
 
         tri = ai.get("triage", "low")
@@ -512,7 +522,7 @@ elif st.session_state.page == 3:
             for q in fus[:5]:
                 st.write("• " + q)
 
-        # CSV/Sheets에 저장 컬럼 추가
+        # CSV/Sheets에 LLM 결과 컬럼 추가
         row["ai_triage"] = tri
         row["ai_summary_kor"] = ai.get("summary_kor", "")
         row["ai_flags_json"] = json.dumps(flags_ai, ensure_ascii=False)

@@ -1,0 +1,42 @@
+key: MIDAS
+title: MIDAS (Migraine Disability Assessment)
+input_type: number_int
+scoring: midas_sum
+domains: {}
+items:
+- 'no': 1
+  text: 지난 3개월 동안 두통 때문에 결석/결근한 날(일수)
+  min: 0
+  max: 90
+  weight: 1
+- 'no': 2
+  text: 지난 3개월 동안 직장/학교에서 능률이 절반 이하였던 날(1번 제외, 일수)
+  min: 0
+  max: 90
+  weight: 1
+- 'no': 3
+  text: 지난 3개월 동안 두통 때문에 가사일을 할 수 없었던 날(일수)
+  min: 0
+  max: 90
+  weight: 1
+- 'no': 4
+  text: 지난 3개월 동안 가사능률이 절반 이하였던 날(3번 제외, 일수)
+  min: 0
+  max: 90
+  weight: 1
+- 'no': 5
+  text: 지난 3개월 동안 가족/사회/여가활동을 놓친 날(일수)
+  min: 0
+  max: 90
+  weight: 1
+- 'no': A
+  text: 지난 3개월간 두통이 있었던 날(일수)
+  min: 0
+  max: 90
+  weight: 0
+- 'no': B
+  text: 두통 강도(0=전혀 아님, 10=가장 심함)
+  min: 0
+  max: 10
+  weight: 0
+max_score: 270

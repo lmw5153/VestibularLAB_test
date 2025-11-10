@@ -1,23 +1,25 @@
-# app.py — Multi Survey (DHI + VADL) / LLM 키는 Streamlit Secrets에서만 읽기
-# - 설문 선택 단일 클릭 반영 + 2초 로딩 스피너
-# - 참여자 정보
+# app.py — Multi Survey (DHI + VADL) / 프리셋 안전 적용 + 지연 스피너 + LLM 키는 Secrets 전용
+# - 설문 선택 단일 클릭 반영 + 2초 로딩 스피너(Cloud 플리커 완화)
+# - 프리셋 적용: 같은 렌더 사이클에서 위젯 값 직접 변경 금지 → '대기 플래그' + rerun 훅
+# - 참여자 정보(이름/생년월일/성별/메모/ID)
 # - YAML 설문 로드(utils.registry)
 # - DHI/VADL 채점, CSV/Google Sheets 저장
 # - 규칙 기반 이상탐지 + LLM 기반 모순 가능성 요약
-# - LLM API 키는 st.secrets["openai_api_key"]만 사용
+# - LLM API 키는 st.secrets["openai_api_key"] (또는 secrets.general.openai_api_key)만 사용
 
 import os, sys, time, json
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
-# --- force project root on sys.path (배포 경로 차이 방지) ---
+# --- 프로젝트 루트를 sys.path에 강제 주입(배포 경로 차이 방지) ---
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-# ----------------------------------------------------------
+# --------------------------------------------------------------
 
 # 내부 모듈
 from utils.registry import list_surveys, load_survey
@@ -32,10 +34,9 @@ st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
 
 
 # ─────────────────────────────────────────────────────────────
-# 유틸: LLM 키는 오직 Streamlit Secrets에서만
+# 유틸: LLM 키는 '오직' Streamlit Secrets에서만 읽기
 # ─────────────────────────────────────────────────────────────
 def get_secret_openai_key() -> str:
-    """Streamlit Secrets에서만 읽는다. 없으면 빈 문자열."""
     try:
         if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
             return st.secrets["openai_api_key"]
@@ -85,12 +86,14 @@ def init_state():
         answers_map={}, summaries={},
         # UX
         loading_until=0.0,
+        _pending_preset=None,  # 프리셋 적용 대기 플래그
     )
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 init_state()
+
 
 # ─────────────────────────────────────────────────────────────
 # 사이드바: Google Sheets + LLM 키 상태
@@ -116,17 +119,35 @@ if st.session_state.page == 1:
     key_to_title = {m["key"]: m["title"] for m in metas}
     all_keys = [m["key"] for m in metas]
 
-    # 옵션에 없는 값 제거
+    # 옵션에 없는 값 제거 (렌더 전 정리)
     st.session_state.selected_keys = [k for k in st.session_state.selected_keys if k in all_keys]
 
-    # 프리셋
+    # 프리셋 로드
     presets_path = Path("data/presets.json")
-    presets = {}
     if presets_path.exists():
         try:
             presets = json.load(open(presets_path, "r", encoding="utf-8"))
         except Exception:
             presets = {}
+    else:
+        presets = {}
+
+    # ▼▼▼ 프리셋 '적용 대기' 훅: multiselect 렌더 전에만 동작 ▼▼▼
+    pending = st.session_state.get("_pending_preset", None)
+    if pending:
+        raw = presets.get(pending, [])
+        # 문자열/딕셔너리까지 방어적으로 처리
+        if isinstance(raw, dict):
+            raw = list(raw.keys())
+        elif isinstance(raw, str):
+            raw = [x.strip() for x in raw.split(",") if x.strip()]
+
+        st.session_state.selected_keys = [k for k in raw if k in all_keys]
+        st.session_state.preset_name = pending
+        st.session_state.loading_until = time.time() + 2.0
+        st.session_state._pending_preset = None
+        st.rerun()
+    # ▲▲▲ 프리셋 '적용 대기' 훅 끝 ▲▲▲
 
     left, right = st.columns([2, 1])
     with left:
@@ -143,6 +164,7 @@ if st.session_state.page == 1:
             on_change=on_select_change,
         )
 
+        # 선택 지연 스피너
         remain = st.session_state.loading_until - time.time()
         if remain > 0:
             with st.spinner("설문 구성을 불러오는 중..."):
@@ -164,15 +186,13 @@ if st.session_state.page == 1:
                         st.session_state.preset_name = preset_name.strip()
                     else:
                         st.warning("프리셋 이름을 입력하세요.")
-            if presets:
-                pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
-                if pick != "(선택)":
-                    if st.button("프리셋 적용"):
-                        st.session_state.selected_keys = [k for k in presets[pick] if k in all_keys]
-                        st.session_state.preset_name = pick
-                        st.session_state.loading_until = time.time() + 2.0
-                        st.success(f"프리셋 '{pick}' 적용")
-                        st.rerun()
+
+            # 프리셋 적용은 '대기 플래그'만 세팅 → 다음 렌더 초기에 안전 주입
+            pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
+            if pick != "(선택)":
+                if st.button("프리셋 적용", key="apply_preset_btn"):
+                    st.session_state._pending_preset = pick
+                    st.rerun()
 
     with right:
         st.subheader("참여자/동의")
@@ -182,8 +202,10 @@ if st.session_state.page == 1:
             dob = st.date_input("생년월일", value=_birth_date, key="dob")
         else:
             dob = st.date_input("생년월일", key="dob")
-        sex = st.selectbox("성별", ["", "남", "여", "기타"], index=["","남","여","기타"].index(st.session_state.participant_sex or ""))
-        notes = st.text_area("기타사항", value=st.session_state.participant_notes, height=90)
+        sex = st.selectbox("성별", ["", "남", "여", "기타"],
+                           index=["","남","여","기타"].index(st.session_state.participant_sex or ""))
+        notes = st.text_area("기타사항", value=st.session_state.participant_notes, height=90,
+                             placeholder="알레르기, 복용약, 주의사항 등")
         pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
         agree = st.checkbox("개인정보 이용에 동의합니다.")
 
@@ -194,6 +216,7 @@ if st.session_state.page == 1:
             st.session_state.participant_sex = sex
             st.session_state.participant_notes = notes.strip()
             st.session_state.participant_id = pid.strip()
+
             st.session_state.queue = list(st.session_state.selected_keys)
             st.session_state.curr_idx = 0
             st.session_state.answers_map = {}
@@ -204,7 +227,7 @@ if st.session_state.page == 1:
 
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 2 — 설문 진행
+# PAGE 2 — 설문 진행(순차)
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 2:
     queue = st.session_state.queue
@@ -261,7 +284,8 @@ elif st.session_state.page == 2:
             ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1; st.rerun()
+            st.session_state[f"i_{key}"] -= 1
+            st.rerun()
 
         if c2.button(btn_label, type="primary"):
             ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
@@ -304,13 +328,20 @@ elif st.session_state.page == 2:
 
         c1, c2 = st.columns(2)
         if c1.button("이전", disabled=(i == 0)):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": na_label if na else str(val), "score": None if na else val}
+            ans = {
+                "no": it_no, "domain": it_domain, "text": it_text,
+                "label": na_label if na else str(val), "score": None if na else val
+            }
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
-            st.session_state[f"i_{key}"] -= 1; st.rerun()
+            st.session_state[f"i_{key}"] -= 1
+            st.rerun()
 
         if c2.button(btn_label, type="primary"):
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": na_label if na else str(val), "score": None if na else val}
+            ans = {
+                "no": it_no, "domain": it_domain, "text": it_text,
+                "label": na_label if na else str(val), "score": None if na else val
+            }
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
 
@@ -404,7 +435,7 @@ elif st.session_state.page == 3:
 
     st.divider()
 
-    # ── LLM 기반 모순 가능성 요약 (secrets 키만 사용)
+    # ── LLM 기반 모순 가능성 요약 (Secrets 키만 사용)
     st.subheader("LLM 기반 이상응답 추론 (모순 가능성 제시)")
     llm_on = st.checkbox("LLM 사용", value=False)
     llm_model = st.selectbox("모델", ["gpt-4o-mini", "gpt-4o"], index=0, disabled=not llm_on)
@@ -416,13 +447,18 @@ elif st.session_state.page == 3:
         else:
             ai = run_llm_inference(per_survey_raw=per_raw, payload=payload, model=llm_model, api_key=key)
             tri = ai.get("triage", "low")
-            st.write("전반 주의도:", tri.upper())
+            if tri == "high": st.error("전반 주의도: HIGH")
+            elif tri == "medium": st.warning("전반 주의도: MEDIUM")
+            else: st.info("전반 주의도: LOW")
+
             if ai.get("summary_kor"):
                 st.markdown("**요약**"); st.write(ai["summary_kor"])
             if ai.get("flags"):
                 st.markdown("**지적된 모순 가능성**")
                 for f in ai["flags"]:
                     st.write(f"- {f.get('id','Lx')}: {f.get('reason','')}")
+                    ev = f.get("evidence") or []
+                    if ev: st.caption("근거: " + "; ".join(ev[:6]))
             if ai.get("followups"):
                 st.markdown("**재확인 질문 제안**")
                 for q in ai["followups"][:5]:

@@ -1,0 +1,20 @@
+{
+  "version": "v1.0",
+  "concepts": {"VADL.core_items": [13, 14, 15, 16, 17]},
+  "rules": [
+    {
+      "id": "R1_VADL8PLUS_vs_DHI_MILD",
+      "severity": "high",
+      "when": {"VADL.core_any_gte": 8, "DHI.total_range": [0, 30]},
+      "explain": "VADL 핵심(보행/계단)에서 8~10점(타인 도움/불능)인데 DHI는 경증",
+      "suggest": ["보행/계단 상황 구체 확인", "낙상 위험 선별", "DHI 재확인"]
+    },
+    {
+      "id": "R2_VADL_ALL_LE3_vs_DHI_SEVERE",
+      "severity": "medium",
+      "when": {"VADL.all_scores_lte": true, "DHI.total_gte": 60},
+      "explain": "VADL은 전반 1~3점(단독 수행 가능)인데 DHI는 중증",
+      "suggest": ["주관증상 대비 수행능력 괴리 확인", "불안/우울/회피 평가"]
+    }
+  ]
+}

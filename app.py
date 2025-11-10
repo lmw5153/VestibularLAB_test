@@ -1,12 +1,15 @@
-# app.py — Multi Survey (DHI + VADL) with robust selection & YAML surveys
-# - 설문 선택 중복/플리커 방지 (선택값 정리)
+# app.py — Multi Survey (DHI + VADL) with stable selection & loading spinner
+# - 설문 선택 즉시 2초 로딩 스피너(Cloud 지연/플리커 완화)
+# - multiselect: key만 사용(default 미사용) → 단일 클릭 반영
 # - 참여자 입력(이름/생년월일/성별/기타사항) + CSV/Sheets 저장
 # - VADL '적용불능' 기본 미체크 (과거 응답 시 복원)
 # - 마지막 문항 버튼 라벨: 제출/다음 설문/다음
 # - 규칙 기반 이상탐지 + LLM 추론 옵션 (키 자동 탐지)
+# - YAML 설문 로드(utils.registry) 가정
 
 import os
 import json
+import time
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -14,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# 내부 모듈
+# 내부 모듈 (프로젝트 구조 기준)
 from utils.registry import list_surveys, load_survey
 from utils.export import build_row, save_df_to_gsheet
 from utils.consistency import make_payload, load_rulebook, eval_rules
@@ -84,6 +87,8 @@ def _init_state():
         curr_idx=0,         # 현재 설문 index
         answers_map={},     # {key: [ {no,domain,text,label,score}, ... ]}
         summaries={},       # {key: {total,max,domains}}
+        # 로딩 스피너 제어
+        loading_until=0.0,
     )
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -100,7 +105,7 @@ gs_ws = st.sidebar.text_input("워크시트 이름", value="responses", disabled
 
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 1 — Main: 설문 선택/프리셋/참여자 입력/시작
+# PAGE 1 — Main: 설문 선택/프리셋/참여자 입력/시작 (지연 로딩 스피너)
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
     st.title("🧠 인지 설문 플랫폼 — Multi Survey")
@@ -110,28 +115,43 @@ if st.session_state.page == 1:
     key_to_title = {m["key"]: m["title"] for m in metas}
     all_keys = [m["key"] for m in metas]
 
-    # 기존 선택에서 현재 목록에 없는 키 제거 (플리커 방지 1)
+    # 위젯 렌더 전: 현재 옵션에 없는 값 제거(플리커 방지)
     st.session_state.selected_keys = [k for k in st.session_state.selected_keys if k in all_keys]
 
     # 프리셋 저장/불러오기
     presets_path = Path("data/presets.json")
     if presets_path.exists():
-        presets = json.load(open(presets_path, "r", encoding="utf-8"))
+        try:
+            presets = json.load(open(presets_path, "r", encoding="utf-8"))
+        except Exception:
+            presets = {}
     else:
         presets = {}
 
     cols = st.columns([2, 1])
     with cols[0]:
         st.subheader("설문 선택")
-        sel = st.multiselect(
+
+        # 선택 변경 시 2초 로딩 예약
+        def _on_select_changed():
+            st.session_state.loading_until = time.time() + 2.0  # 2초
+
+        # multiselect에는 key만 주고 default는 주지 않음(단일 클릭 반영)
+        st.multiselect(
             "실시할 설문을 선택하세요",
             options=all_keys,
             format_func=lambda k: key_to_title.get(k, k),
-            default=st.session_state.selected_keys,
+            key="selected_keys",
+            on_change=_on_select_changed,
         )
-        # 선택 직후 정리(중복 제거 + 유효키만 유지) — 플리커 방지 2
-        sel = list(dict.fromkeys([k for k in sel if k in all_keys]))
-        st.session_state.selected_keys = sel
+
+        # 예약된 로딩이 남아 있으면 스피너 표시 후 안정적으로 재구성
+        remaining = st.session_state.loading_until - time.time()
+        if remaining > 0:
+            with st.spinner("설문 구성을 불러오는 중..."):
+                time.sleep(min(remaining, 2.0))
+            st.session_state.loading_until = 0.0
+            st.rerun()
 
         with st.expander("프리셋 관리", expanded=False):
             preset_col1, preset_col2 = st.columns([3, 1])
@@ -154,8 +174,10 @@ if st.session_state.page == 1:
                     if st.button("프리셋 적용"):
                         st.session_state.selected_keys = [k for k in presets[pick] if k in all_keys]
                         st.session_state.preset_name = pick
+                        # 프리셋 적용 UX 통일: 로딩 예약
+                        st.session_state.loading_until = time.time() + 2.0
                         st.success(f"프리셋 '{pick}' 적용")
-                        st.rerun()  # 즉시 재구성
+                        st.rerun()
 
     with cols[1]:
         st.subheader("참여자/동의")
@@ -200,6 +222,8 @@ if st.session_state.page == 1:
             st.session_state.answers_map = {}
             st.session_state.summaries = {}
             st.session_state.page = 2
+            # UX 통일: 시작 시에도 짧은 로딩(선택)
+            st.session_state.loading_until = time.time() + 1.0
             st.rerun()
 
 

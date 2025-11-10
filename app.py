@@ -1,31 +1,35 @@
-# app.py — Multi Survey (DHI + VADL) / 프리셋 안전 적용 + 지연 스피너 + LLM 키는 Secrets 전용
-# - 설문 선택 단일 클릭 반영 + 2초 로딩 스피너(Cloud 플리커 완화)
-# - 프리셋 적용: 같은 렌더 사이클에서 위젯 값 직접 변경 금지 → '대기 플래그' + rerun 훅
-# - 참여자 정보(이름/생년월일/성별/메모/ID)
-# - YAML 설문 로드(utils.registry)
-# - DHI/VADL 채점, CSV/Google Sheets 저장
-# - 규칙 기반 이상탐지 + LLM 기반 모순 가능성 요약
-# - LLM API 키는 st.secrets["openai_api_key"] (또는 secrets.general.openai_api_key)만 사용
+# app.py — Multi Survey Platform (Neurology / Cognitive)
+# - Sidebar collapsed by default
+# - DOB text input yyyy.mm.dd (optional); Only consent is required to start
+# - Keyboard shortcuts: ↑/↓ radio, ←/→ slider, Space=next, Z=prev
+# - Surveys: DHI, VADL, MIDAS, HIT-6, VAS-D, PHQ-9, GAD-7
+# - CSV export (drops *_max columns), optional Google Sheets
+# - LLM consistency (secrets only)
 
 import os, sys, time, json
-from datetime import datetime
 from io import StringIO
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
-# --- 프로젝트 루트를 sys.path에 강제 주입(배포 경로 차이 방지) ---
+# ─────────────────────────────────────────────────────────────
+# Project path fix
+# ─────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-# --------------------------------------------------------------
 
-# 내부 모듈
+# ─────────────────────────────────────────────────────────────
+# Internal modules
+# ─────────────────────────────────────────────────────────────
 from utils.registry import list_surveys, load_survey
 from utils.export import build_row, save_df_to_gsheet
 from utils.consistency import make_payload, load_rulebook, eval_rules
 from utils.llm import run_llm_inference
+
 from scoring.dhi import DHIScorer
 from scoring.vadl import VADLScorer
 from scoring.midas import MIDASScorer
@@ -34,25 +38,24 @@ from scoring.vasd import VASDScorer
 from scoring.phq9 import PHQ9Scorer
 from scoring.gad7 import GAD7Scorer
 
-
 SCORERS = {
     "DHI": DHIScorer(),
     "VADL": VADLScorer(),
     "MIDAS": MIDASScorer(),
     "HIT6": HIT6Scorer(),
-    "VASD": VASDScorer(),   # ← 추가
-    "PHQ9": PHQ9Scorer(),   # ← 추가
-    "GAD7": GAD7Scorer(),   # ← 추가
+    "VASD": VASDScorer(),
+    "PHQ9": PHQ9Scorer(),
+    "GAD7": GAD7Scorer(),
 }
-#st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
+
 st.set_page_config(
     page_title="인지 설문 플랫폼 (멀티)",
     layout="wide",
-    initial_sidebar_state="collapsed"   # ← 사이드바 기본 접힘
+    initial_sidebar_state="collapsed"
 )
 
 # ─────────────────────────────────────────────────────────────
-# 유틸: LLM 키는 '오직' Streamlit Secrets에서만 읽기
+# Secrets helpers
 # ─────────────────────────────────────────────────────────────
 def get_secret_openai_key() -> str:
     try:
@@ -66,15 +69,32 @@ def get_secret_openai_key() -> str:
         pass
     return ""
 
-
 def mask_key(k: str, show: int = 4) -> str:
     if not k:
         return "(없음)"
     return k if len(k) <= show * 2 else k[:show] + "•" * 8 + k[-show:]
 
+# ─────────────────────────────────────────────────────────────
+# Query param helpers (for keyboard actions)
+# ─────────────────────────────────────────────────────────────
+def get_qp(key: str, default=None):
+    try:
+        return st.query_params.get(key, default)
+    except Exception:
+        vals = st.experimental_get_query_params().get(key, [default])
+        return vals if not isinstance(vals, list) else (vals[0] if vals else default)
+
+def set_qp(**kwargs):
+    try:
+        st.query_params.clear()
+        for k, v in kwargs.items():
+            if v is not None:
+                st.query_params[k] = v
+    except Exception:
+        st.experimental_set_query_params(**{k:[v] for k,v in kwargs.items() if v is not None})
 
 # ─────────────────────────────────────────────────────────────
-# 안전 보정: YAML items 필수키 보정
+# Utils
 # ─────────────────────────────────────────────────────────────
 def normalize_items(items):
     out = []
@@ -89,26 +109,18 @@ def normalize_items(items):
         })
     return out
 
-def _qtitle(no, domain, text):
-# 번호는 항상 보이게, 도메인은 있으면 괄호로
-    no_str = f"Q{no}" if no is not None else ""
-    dom_str = f" ({domain})" if domain else ""
-    return f"{no_str}{dom_str}. {text}".strip()
-# ─────────────────────────────────────────────────────────────
-# 세션 초기화
-# ─────────────────────────────────────────────────────────────
 def init_state():
     defaults = dict(
         page=1,
-        # 참여자
+        # participant
         participant_id="", participant_name="",
-        participant_birth=None, participant_sex="", participant_notes="",
-        # 진행
+        participant_birth="", participant_sex="", participant_notes="",
+        # survey selection & progress
         preset_name="", selected_keys=[], queue=[], curr_idx=0,
         answers_map={}, summaries={},
         # UX
         loading_until=0.0,
-        _pending_preset=None,  # 프리셋 적용 대기 플래그
+        _pending_preset=None,
     )
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -116,9 +128,8 @@ def init_state():
 
 init_state()
 
-
 # ─────────────────────────────────────────────────────────────
-# 사이드바: Google Sheets + LLM 키 상태
+# Sidebar (collapsible by default)
 # ─────────────────────────────────────────────────────────────
 st.sidebar.subheader("Google Sheets 연동(옵션)")
 gs_enable = st.sidebar.checkbox("응답을 Google Sheets로 저장", value=False)
@@ -130,10 +141,8 @@ with st.sidebar.expander("🔐 LLM 키 상태(마스킹)"):
     st.write("OPENAI_API_KEY:", mask_key(api_key))
     st.caption("※ 키는 secrets에만 저장되며, 브라우저로 원문은 노출하지 않습니다.")
 
-
-
 # ─────────────────────────────────────────────────────────────
-# PAGE 1 — 메인(설문 선택/프리셋/참여자/시작)
+# PAGE 1 — Main
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
     st.title("🧠 인지 설문 플랫폼 — Multi Survey")
@@ -142,10 +151,10 @@ if st.session_state.page == 1:
     key_to_title = {m["key"]: m["title"] for m in metas}
     all_keys = [m["key"] for m in metas]
 
-    # 옵션에 없는 값 제거 (렌더 전 정리)
+    # sanitize selection
     st.session_state.selected_keys = [k for k in st.session_state.selected_keys if k in all_keys]
 
-    # 프리셋 로드
+    # Presets
     presets_path = Path("data/presets.json")
     if presets_path.exists():
         try:
@@ -155,25 +164,20 @@ if st.session_state.page == 1:
     else:
         presets = {}
 
-    # ▼▼▼ 프리셋 '적용 대기' 훅: multiselect 렌더 전에만 동작 ▼▼▼
+    # pending preset apply (before multiselect render)
     pending = st.session_state.get("_pending_preset", None)
     if pending:
         raw = presets.get(pending, [])
-        if isinstance(raw, dict):
-            raw = list(raw.keys())
-        elif isinstance(raw, str):
-            raw = [x.strip() for x in raw.split(",") if x.strip()]
-
+        if isinstance(raw, dict): raw = list(raw.keys())
+        elif isinstance(raw, str): raw = [x.strip() for x in raw.split(",") if x.strip()]
         st.session_state.selected_keys = [k for k in raw if k in all_keys]
         st.session_state.preset_name = pending
         st.session_state.loading_until = time.time() + 2.0
         st.session_state._pending_preset = None
         st.rerun()
-    # ▲▲▲ 프리셋 '적용 대기' 훅 끝 ▲▲▲
 
     left, right = st.columns([2, 1])
 
-    # ── 좌측: 설문 선택/프리셋
     with left:
         st.subheader("설문 선택")
 
@@ -188,7 +192,7 @@ if st.session_state.page == 1:
             on_change=on_select_change,
         )
 
-        # 선택 지연 스피너
+        # loading spinner (debounce)
         remain = st.session_state.loading_until - time.time()
         if remain > 0:
             with st.spinner("설문 구성을 불러오는 중..."):
@@ -217,11 +221,9 @@ if st.session_state.page == 1:
                     st.session_state._pending_preset = pick
                     st.rerun()
 
-    # ── 우측: 참여자/동의 (생년월일 텍스트 입력 + 동의만으로 시작 가능)
     with right:
         st.subheader("참여자/동의")
 
-        # 선택 입력들
         name = st.text_input("이름 (선택)", value=st.session_state.participant_name)
 
         dob_text = st.text_input(
@@ -235,16 +237,18 @@ if st.session_state.page == 1:
             index=["","남","여","기타"].index(st.session_state.participant_sex or "")
         )
         notes = st.text_area(
-            "기타사항 (선택)", value=st.session_state.participant_notes, height=90,
+            "기타사항 (선택)",
+            value=st.session_state.participant_notes,
+            height=90,
             placeholder="알레르기, 복용약, 주의사항 등"
         )
         pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
 
         agree = st.checkbox("개인정보 이용에 동의합니다.")
-        start_disabled = not agree  # 동의만 체크되면 시작 가능
+        start_disabled = not agree  # only consent required
 
         if st.button("검사 시작", type="primary", disabled=start_disabled):
-            # 생년월일 텍스트 → YYYY-MM-DD 약식 파싱
+            # parse DOB text → YYYY-MM-DD (weak parse)
             birth_iso = ""
             s = dob_text.strip()
             if s:
@@ -274,10 +278,50 @@ if st.session_state.page == 1:
             st.session_state.loading_until = time.time() + 1.0
             st.rerun()
 
+    # Keyboard tips on main page bottom
+    st.divider()
+    with st.expander("⌨️ 키보드 사용 팁", expanded=False):
+        st.markdown(
+            "- **Radio**: 포커스 상태에서 **↑ / ↓** 로 선택 이동\n"
+            "- **Slider**: 포커스 상태에서 **← / →** 로 값 조절\n"
+            "- **버튼**: 포커스된 버튼에 **Enter/Space** 로 클릭\n"
+            "- **이전으로**: '이전' 버튼에 포커스 후 **Enter**\n"
+            "\n*전역 단축키는 보안 정책상 제한이 있어 기본 위젯 조작을 활용합니다.*"
+        )
+
 # ─────────────────────────────────────────────────────────────
-# PAGE 2 — 설문 진행(순차)
+# PAGE 2 — Survey flow
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 2:
+    # Inject global keyboard hook (Space/Arrows/Z) → ?kb=action
+    components.html("""
+    <script>
+    (function(){
+      function isFormFocused(){
+        const el = document.activeElement;
+        if(!el) return false;
+        const tag = el.tagName;
+        return ['INPUT','TEXTAREA','SELECT','BUTTON'].includes(tag);
+      }
+      window.addEventListener('keydown', function(e){
+        if(isFormFocused()) return;
+        let action = null;
+        if(e.code === 'Space'){ action='next'; e.preventDefault(); }
+        else if(e.key === 'z' || e.key === 'Z'){ action='prev'; }
+        else if(e.key === 'ArrowUp'){ action='up'; }
+        else if(e.key === 'ArrowDown'){ action='down'; }
+        else if(e.key === 'ArrowLeft'){ action='left'; }
+        else if(e.key === 'ArrowRight'){ action='right'; }
+        if(action){
+          const url = new URL(window.location.href);
+          url.searchParams.set('kb', action);
+          window.location.href = url.toString();
+        }
+      }, {passive:false});
+    })();
+    </script>
+    """, height=0)
+
     queue = st.session_state.queue
     idx = st.session_state.curr_idx
     if idx >= len(queue):
@@ -294,13 +338,13 @@ elif st.session_state.page == 2:
     st.title(meta["title"])
     st.caption(f"설문 {idx+1} / {len(queue)}")
 
-    # 이 설문에 대한 응답 버퍼
+    # Answers buffer for this survey
     answers = st.session_state.answers_map.get(key, [])
     if not answers:
         st.session_state.answers_map[key] = []
         answers = st.session_state.answers_map[key]
 
-    # 현재 문항 인덱스
+    # Current item index
     if f"i_{key}" not in st.session_state:
         st.session_state[f"i_{key}"] = 0
     i = st.session_state[f"i_{key}"]
@@ -309,13 +353,12 @@ elif st.session_state.page == 2:
     st.progress((i + 0.0001) / max(n, 1))
     st.caption(f"문항 {i+1} / {n}")
 
-    # 문항 데이터
+    # Item
     it = items[i]
     it_no = it.get("no", i + 1)
     it_domain = it.get("domain", "")
     it_text = it.get("text", "")
 
-    # 문항 제목: 번호 + (도메인) + 텍스트
     def _qtitle(no, domain, text):
         no_str = f"Q{no}" if no is not None else ""
         dom_str = f" ({domain})" if domain else ""
@@ -323,17 +366,139 @@ elif st.session_state.page == 2:
 
     st.subheader(_qtitle(it_no, it_domain, it_text))
 
-    # 진행 제어
     is_last_item = (i == n - 1)
     is_last_survey = (st.session_state.curr_idx == len(st.session_state.queue) - 1)
     btn_label = "제출" if (is_last_item and is_last_survey) else ("다음 설문" if is_last_item else "다음")
 
-    # 이전 응답 복원
     prev = answers[i] if i < len(answers) else {}
 
-    # ─────────────────────────────
-    # 입력 분기 1) 라디오 (DHI/HIT-6/PHQ-9/GAD-7 등)
-    # ─────────────────────────────
+    # ─────────────────────────────────────────────────────────
+    # Keyboard param handler (apply before rendering widgets)
+    # ─────────────────────────────────────────────────────────
+    kb = get_qp("kb", None)
+    if kb:
+        handled = False
+
+        # Arrow movement: update widget state keys; then rerun
+        if input_type == "radio" and kb in ("up","down"):
+            labels = [c[0] for c in meta.get("choices", [])]
+            current = prev.get("label") if prev else None
+            if current not in labels:
+                current = labels[0] if labels else None
+            idx_cur = labels.index(current) if (current in labels) else 0
+            if kb == "up":
+                new_idx = max(0, idx_cur - 1); handled = True
+            else:  # down
+                new_idx = min(len(labels) - 1, idx_cur + 1); handled = True
+            if handled and labels:
+                st.session_state[f"radio_{key}_{i}"] = labels[new_idx]
+
+        if input_type == "slider_0_10" and kb in ("left","right"):
+            cur = prev.get("score") if isinstance(prev, dict) else None
+            if not isinstance(cur, int): cur = int(it.get("min", 0))
+            if kb == "left":
+                cur = max(int(it.get("min", 0)), cur - 1); handled = True
+            else:
+                cur = min(int(it.get("max", 10)), cur + 1); handled = True
+            if handled:
+                st.session_state[f"vas_{key}_{i}"] = int(cur)
+
+        if input_type == "slider_1_10_na" and kb in ("left","right"):
+            cur = prev.get("score") if isinstance(prev, dict) else None
+            if isinstance(cur, int):
+                if kb == "left":
+                    cur = max(1, cur - 1); handled = True
+                else:
+                    cur = min(10, cur + 1); handled = True
+                if handled:
+                    st.session_state[f"slider_{key}_{i}"] = int(cur)
+
+        # prev/next: attempt to move across items now
+        def _save_and_advance_next():
+            # read current value from session_state if exists, else from prev/default
+            if input_type == "radio":
+                labels = [c[0] for c in meta.get("choices", [])]
+                # current selection
+                ss_key = f"radio_{key}_{i}"
+                sel = st.session_state.get(ss_key, None)
+                if sel is None:
+                    sel = prev.get("label") if prev else (labels[0] if labels else "")
+                score = dict(meta.get("choices", [])).get(sel, 0)
+                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
+
+            elif input_type == "number_int":
+                ss_key = f"num_{key}_{i}"
+                val = st.session_state.get(ss_key, None)
+                if not isinstance(val, int):
+                    # fallback to prev or min
+                    if isinstance(prev.get("score"), int):
+                        val = prev["score"]
+                    else:
+                        val = int(it.get("min", 0))
+                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
+
+            elif input_type == "slider_0_10":
+                ss_key = f"vas_{key}_{i}"
+                val = st.session_state.get(ss_key, None)
+                if not isinstance(val, int):
+                    if isinstance(prev.get("score"), int):
+                        val = prev["score"]
+                    else:
+                        val = int(it.get("min", 0))
+                ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
+
+            elif input_type == "slider_1_10_na":
+                ss_na = f"na_{key}_{i}"
+                ss_val = f"slider_{key}_{i}"
+                na = st.session_state.get(ss_na, False)
+                val = st.session_state.get(ss_val, None)
+                if na:
+                    ans = {"no": it_no, "domain": it_domain, "text": it_text,
+                           "label": meta.get("na_label","적용불능"), "score": None}
+                else:
+                    if not isinstance(val, int):
+                        if isinstance(prev.get("score"), int): val = prev["score"]
+                        else: val = 1
+                    ans = {"no": it_no, "domain": it_domain, "text": it_text,
+                           "label": str(val), "score": int(val)}
+            else:
+                return  # unsupported type; do nothing
+
+            if i < len(answers): answers[i] = ans
+            else: answers.append(ans)
+
+            if is_last_item:
+                scorer = SCORERS.get(key)
+                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
+                st.session_state.summaries[key] = summary
+                if is_last_survey:
+                    st.session_state.curr_idx += 1
+                    st.session_state.page = 3
+                else:
+                    st.session_state.curr_idx += 1
+                    next_key = st.session_state.queue[st.session_state.curr_idx]
+                    st.session_state[f"i_{next_key}"] = 0
+                    st.session_state.page = 2
+            else:
+                st.session_state[f"i_{key}"] += 1
+
+        if kb == "prev":
+            if i > 0:
+                st.session_state[f"i_{key}"] -= 1
+                handled = True
+
+        if kb == "next":
+            _save_and_advance_next()
+            handled = True
+
+        if handled:
+            set_qp()  # clear kb
+            st.rerun()
+
+    # ─────────────────────────────────────────────────────────
+    # Input rendering (mouse UI kept as-is)
+    # ─────────────────────────────────────────────────────────
+    # 1) Radio (DHI/HIT-6/PHQ-9/GAD-7)
     if input_type == "radio":
         labels = [c[0] for c in meta.get("choices", [])]
         if not labels:
@@ -369,13 +534,11 @@ elif st.session_state.page == 2:
                 st.session_state[f"i_{key}"] += 1
             st.rerun()
 
-    # ─────────────────────────────
-    # 입력 분기 2) 슬라이더 + 적용불능 (VADL)
-    # ─────────────────────────────
+    # 2) Slider 1–10 with NA (VADL)
     elif input_type == "slider_1_10_na":
         na_label = meta.get("na_label", "적용불능")
         has_score = isinstance(prev, dict) and ("score" in prev)
-        was_na = has_score and (prev["score"] is None)   # 기본 False
+        was_na = has_score and (prev["score"] is None)   # default False
         prev_val = prev["score"] if (has_score and isinstance(prev["score"], int)) else 1
 
         c1, c2 = st.columns([1, 2])
@@ -424,9 +587,7 @@ elif st.session_state.page == 2:
                 st.session_state[f"i_{key}"] += 1
             st.rerun()
 
-    # ─────────────────────────────
-    # 입력 분기 3) 정수 입력 (MIDAS 등)
-    # ─────────────────────────────
+    # 3) Number int (MIDAS)
     elif input_type == "number_int":
         it_min = int(it.get("min", 0))
         it_max = int(it.get("max", 999))
@@ -464,9 +625,7 @@ elif st.session_state.page == 2:
                 st.session_state[f"i_{key}"] += 1
             st.rerun()
 
-    # ─────────────────────────────
-    # 입력 분기 4) 0~10 슬라이더 (VAS-D)
-    # ─────────────────────────────
+    # 4) Slider 0–10 (VAS-D)
     elif input_type == "slider_0_10":
         it_min = int(it.get("min", 0))
         it_max = int(it.get("max", 10))
@@ -507,7 +666,7 @@ elif st.session_state.page == 2:
         st.error(f"지원하지 않는 input_type: {input_type}")
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 3 — 결과/다운로드/이상탐지 + LLM
+# PAGE 3 — Results
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 3:
     st.title("결과 요약 & 비교")
@@ -518,8 +677,13 @@ elif st.session_state.page == 3:
     for c, (k, s) in zip(cols, st.session_state.summaries.items()):
         with c:
             st.subheader(k)
-            if s.get("max") is not None: st.metric("총점", s["total"], delta=f"/ {s['max']}")
-            else: st.metric("총점", s["total"])
+            if s.get("max") is not None:
+                st.metric("총점", s["total"], delta=f"/ {s['max']}")
+            else:
+                st.metric("총점", s["total"])
+            # severity label support (PHQ9/GAD7)
+            if "severity" in s:
+                st.caption(f"등급: {s['severity']}")
             for dkey, dval in s.get("domains", {}).items():
                 st.caption(f"{dkey}: {dval}")
 
@@ -552,11 +716,11 @@ elif st.session_state.page == 3:
     })
 
     df_out = pd.DataFrame([row])
-    
+    # drop *_max columns per requirement
     drop_cols = [c for c in df_out.columns if c.endswith("_max")]
     if drop_cols:
         df_out = df_out.drop(columns=drop_cols, errors="ignore")
-    
+
     buf = StringIO(); df_out.to_csv(buf, index=False, encoding="utf-8-sig")
     st.download_button("📥 통합 CSV 다운로드", data=buf.getvalue().encode("utf-8-sig"),
                        file_name=f"{ts.replace(':','-')}_summary.csv", mime="text/csv")
@@ -584,18 +748,16 @@ elif st.session_state.page == 3:
         row["is_consistent"] = False; row["flags_json"] = json.dumps(flags, ensure_ascii=False)
 
     st.divider()
-
-    # ── LLM 기반 모순 가능성 요약 (Secrets 키만 사용)
     st.subheader("LLM 기반 이상응답 추론 (모순 가능성 제시)")
     llm_on = st.checkbox("LLM 사용", value=False)
     llm_model = st.selectbox("모델", ["gpt-4o-mini", "gpt-4o"], index=0, disabled=not llm_on)
 
     if llm_on and st.button("LLM으로 모순 가능성 분석"):
-        key = get_secret_openai_key()
-        if not key:
+        key_api = get_secret_openai_key()
+        if not key_api:
             st.info("🔑 Secrets에 openai_api_key가 없습니다. App Settings → Secrets에 등록하세요.")
         else:
-            ai = run_llm_inference(per_survey_raw=per_raw, payload=payload, model=llm_model, api_key=key)
+            ai = run_llm_inference(per_survey_raw=per_raw, payload=payload, model=llm_model, api_key=key_api)
             tri = ai.get("triage", "low")
             if tri == "high": st.error("전반 주의도: HIGH")
             elif tri == "medium": st.warning("전반 주의도: MEDIUM")

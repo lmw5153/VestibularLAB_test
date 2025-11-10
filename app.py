@@ -32,7 +32,7 @@ from scoring.vadl import VADLScorer
 SCORERS = {
     "DHI": DHIScorer(),
     "VADL": VADLScorer(),
-    "MIDAS": MIDAScorer(),
+    "MIDAS": MIDASScorer(),
     "HIT6": HIT6Scorer(),
 }
 st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")

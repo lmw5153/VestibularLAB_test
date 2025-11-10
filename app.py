@@ -78,7 +78,11 @@ def normalize_items(items):
         })
     return out
 
-
+def _qtitle(no, domain, text):
+# 번호는 항상 보이게, 도메인은 있으면 괄호로
+    no_str = f"Q{no}" if no is not None else ""
+    dom_str = f" ({domain})" if domain else ""
+    return f"{no_str}{dom_str}. {text}".strip()
 # ─────────────────────────────────────────────────────────────
 # 세션 초기화
 # ─────────────────────────────────────────────────────────────
@@ -114,6 +118,7 @@ with st.sidebar.expander("🔐 LLM 키 상태(마스킹)"):
     api_key = get_secret_openai_key()
     st.write("OPENAI_API_KEY:", mask_key(api_key))
     st.caption("※ 키는 secrets에만 저장되며, 브라우저로 원문은 노출하지 않습니다.")
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -270,7 +275,9 @@ elif st.session_state.page == 2:
     it_no = it.get("no", i + 1)
     it_domain = it.get("domain", "")
     it_text = it.get("text", "")
-    st.subheader(f"({it_domain}) {it_text}")
+    
+
+    st.subheader(_qtitle(it_no, it_domain, it_text))
 
     is_last_item = (i == n - 1)
     is_last_survey = (st.session_state.curr_idx == len(st.session_state.queue) - 1)

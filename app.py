@@ -28,6 +28,8 @@ from utils.consistency import make_payload, load_rulebook, eval_rules
 from utils.llm import run_llm_inference
 from scoring.dhi import DHIScorer
 from scoring.vadl import VADLScorer
+from scoring.midas import MIDASScorer
+from scoring.hit6 import HIT6Scorer
 
 SCORERS = {
     "DHI": DHIScorer(),

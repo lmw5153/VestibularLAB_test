@@ -1,0 +1,36 @@
+key: DHI
+title: "DHI (Dizziness Handicap Inventory)"
+input_type: radio
+scoring: sum_with_domains
+domains: {P: Physical, F: Functional, E: Emotional}
+choices:
+  - ["항상", 4]
+  - ["가끔", 2]
+  - ["없다", 0]
+max_score: 100
+items:
+  - {no: 1,  domain: P, text: "위를 쳐다보면 증상이 심해집니까?"}
+  - {no: 2,  domain: E, text: "증상 때문에 좌절감을 느낍니까?"}
+  - {no: 3,  domain: F, text: "증상 때문에 출장 또는 여행에 제한을 받습니까?"}
+  - {no: 4,  domain: P, text: "슈퍼마켓이나 시장 통로로 걸어가면 증상이 심해집니까?"}
+  - {no: 5,  domain: F, text: "증상 때문에 잠자리에 들거나 일어나는 것이 어렵습니까?"}
+  - {no: 6,  domain: F, text: "증상 때문에 외식, 모임참석 등의 사회생활 참여가 제한됩니까?"}
+  - {no: 7,  domain: F, text: "증상 때문에 글 읽는 것이 어렵습니까?"}
+  - {no: 8,  domain: F, text: "활동적 일을 할 때 증상이 심해집니까?"}
+  - {no: 9,  domain: E, text: "증상 때문에 혼자 외출하는 것이 두렵습니까?"}
+  - {no: 10, domain: E, text: "증상 때문에 다른 사람들 앞에서 당황한 적이 있습니까?"}
+  - {no: 11, domain: P, text: "머리를 빨리 움직이면 증상이 심해집니까?"}
+  - {no: 12, domain: F, text: "증상 때문에 높은 곳을 피합니까?"}
+  - {no: 13, domain: P, text: "잠자리에서 돌아누울 때 증상이 심해집니까?"}
+  - {no: 14, domain: F, text: "증상 때문에 힘든 집안일을 하기가 어렵습니까?"}
+  - {no: 15, domain: E, text: "술 취한 것으로 오해받을까 걱정됩니까?"}
+  - {no: 16, domain: F, text: "증상 때문에 혼자 산책하는 것이 어렵습니까?"}
+  - {no: 17, domain: P, text: "일직선으로 걸을 때 증상이 심해집니까?"}
+  - {no: 18, domain: E, text: "증상 때문에 집중하기가 어렵습니까?"}
+  - {no: 19, domain: F, text: "어두운 밤에 걷기 어렵습니까?"}
+  - {no: 20, domain: E, text: "집에 혼자 있는 것이 걱정됩니까?"}
+  - {no: 21, domain: E, text: "스스로 장애가 있다고 느낍니까?"}
+  - {no: 22, domain: E, text: "대인관계에 스트레스를 느낍니까?"}
+  - {no: 23, domain: E, text: "우울합니까?"}
+  - {no: 24, domain: F, text: "직장 일이나 집안일에 지장을 받습니까?"}
+  - {no: 25, domain: P, text: "몸을 굽히면 증상이 심해집니까?"}

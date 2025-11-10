@@ -1,0 +1,47 @@
+key: VADL
+title: "VADL (Vestibular Disorders Activities of Daily Living)"
+input_type: slider_1_10_na
+scoring: vadl_sum
+domains: {ADL: "Activities of Daily Living"}
+na_label: "적용불능"
+score_info:
+  "1":  ["단독 수행 가능", "정상 수행"]
+  "2":  ["단독 수행 가능", "다소 불편 수행"]
+  "3":  ["단독 수행 가능", "수행 능력 약간 감소"]
+  "4":  ["단독 수행 가능", "수행 능력 많이 감소"]
+  "5":  ["보조 사물 필요", "간혹 필요"]
+  "6":  ["보조 사물 필요", "항상 필요"]
+  "7":  ["보조 사물 필요", "특수 장치 필요"]
+  "8":  ["타인 도움 필요", "간혹 필요"]
+  "9":  ["타인 도움 필요", "항상 필요"]
+  "10": ["타인 도움 필요", "수행 불능"]
+core_items: [13,14,15,16,17]
+items:
+  - {no: 1,  domain: ADL, text: "누워있다가 앉기"}
+  - {no: 2,  domain: ADL, text: "침대나 의자에 앉아있다가 일어나기"}
+  - {no: 3,  domain: ADL, text: "상의 입기"}
+  - {no: 4,  domain: ADL, text: "하의 입기"}
+  - {no: 5,  domain: ADL, text: "양말 또는 스타킹 신기"}
+  - {no: 6,  domain: ADL, text: "신발 신기"}
+  - {no: 7,  domain: ADL, text: "욕조에 들어가거나 나오기"}
+  - {no: 8,  domain: ADL, text: "혼자 목욕하거나 샤워하기"}
+  - {no: 9,  domain: ADL, text: "머리 위 선반에 있는 물건을 잡기"}
+  - {no: 10, domain: ADL, text: "바닥에 있는 물건을 잡기"}
+  - {no: 11, domain: ADL, text: "식사 준비하기"}
+  - {no: 12, domain: ADL, text: "성생활"}
+  - {no: 13, domain: ADL, text: "편평한 길을 걷기"}
+  - {no: 14, domain: ADL, text: "울퉁불퉁한 길을 걷기"}
+  - {no: 15, domain: ADL, text: "계단 올라가기"}
+  - {no: 16, domain: ADL, text: "계단 내려가기"}
+  - {no: 17, domain: ADL, text: "좁은 길 걸어가기"}
+  - {no: 18, domain: ADL, text: "탁 트인 공간을 가기"}
+  - {no: 19, domain: ADL, text: "혼잡한 사람들 사이를 가기"}
+  - {no: 20, domain: ADL, text: "엘리베이터 타기"}
+  - {no: 21, domain: ADL, text: "에스컬레이터 타기"}
+  - {no: 22, domain: ADL, text: "운전하기"}
+  - {no: 23, domain: ADL, text: "물건 들고 이동"}
+  - {no: 24, domain: ADL, text: "가벼운 집안일"}
+  - {no: 25, domain: ADL, text: "힘든 집안일"}
+  - {no: 26, domain: ADL, text: "활동적인 여가생활"}
+  - {no: 27, domain: ADL, text: "업무 수행"}
+  - {no: 28, domain: ADL, text: "차 타고 시내 이동"}

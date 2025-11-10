@@ -33,6 +33,8 @@ from scoring.hit6 import HIT6Scorer
 from scoring.vasd import VASDScorer
 from scoring.phq9 import PHQ9Scorer
 from scoring.gad7 import GAD7Scorer
+
+
 SCORERS = {
     "DHI": DHIScorer(),
     "VADL": VADLScorer(),

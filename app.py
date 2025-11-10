@@ -99,70 +99,63 @@ gs_url = st.sidebar.text_input("스프레드시트 URL", placeholder="https://do
 gs_ws = st.sidebar.text_input("워크시트 이름", value="responses", disabled=not gs_enable)
 
 
-# ── PAGE 1: 설문 선택 영역 (교체본) ─────────────────────────────────────
-metas = list_surveys()
-key_to_title = {m["key"]: m["title"] for m in metas}
-all_keys = [m["key"] for m in metas]
+# ─────────────────────────────────────────────────────────────
+# PAGE 1 — Main: 설문 선택/프리셋/참여자 입력/시작
+# ─────────────────────────────────────────────────────────────
+if st.session_state.page == 1:
+    st.title("🧠 인지 설문 플랫폼 — Multi Survey")
+    st.write("여러 설문을 동시에 선택하고 프리셋으로 저장해 다음에 쉽게 불러올 수 있습니다.")
 
-# 1) 세션 초기화 (최초 1회)
-if "selected_keys" not in st.session_state:
-    st.session_state.selected_keys = []
+    metas = list_surveys()
+    key_to_title = {m["key"]: m["title"] for m in metas}
+    all_keys = [m["key"] for m in metas]
 
-# 2) 현재 옵션에 없는 값은 미리 제거 (위젯 렌더 전에!)
-valid_selected = [k for k in st.session_state.selected_keys if k in all_keys]
-if valid_selected != st.session_state.selected_keys:
-    st.session_state.selected_keys = valid_selected
+    # 기존 선택에서 현재 목록에 없는 키 제거 (플리커 방지 1)
+    st.session_state.selected_keys = [k for k in st.session_state.selected_keys if k in all_keys]
 
-st.subheader("설문 선택")
-
-# 3) multiselect에는 'key'만 주고 'default'는 주지 않습니다.
-#    → 위젯이 자체적으로 값을 기억하고, 클릭 1번에 즉시 반영됩니다.
-st.multiselect(
-    "실시할 설문을 선택하세요",
-    options=all_keys,
-    format_func=lambda k: key_to_title.get(k, k),
-    key="selected_keys",  # <- 핵심
-)
-
-with st.expander("프리셋 관리", expanded=False):
-    preset_col1, preset_col2 = st.columns([3, 1])
-    with preset_col1:
-        preset_name = st.text_input("프리셋 이름", value=st.session_state.get("preset_name", ""))
-
-    with preset_col2:
-        if st.button("저장"):
-            if preset_name.strip():
-                presets_path = Path("data/presets.json")
-                presets_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    presets = json.load(open(presets_path, "r", encoding="utf-8"))
-                except Exception:
-                    presets = {}
-                presets[preset_name.strip()] = st.session_state.selected_keys
-                json.dump(presets, open(presets_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-                st.session_state.preset_name = preset_name.strip()
-                st.success("프리셋 저장 완료")
-            else:
-                st.warning("프리셋 이름을 입력하세요.")
-
-    # 프리셋 불러오기
+    # 프리셋 저장/불러오기
     presets_path = Path("data/presets.json")
-    presets = {}
     if presets_path.exists():
-        try:
-            presets = json.load(open(presets_path, "r", encoding="utf-8"))
-        except Exception:
-            presets = {}
+        presets = json.load(open(presets_path, "r", encoding="utf-8"))
+    else:
+        presets = {}
 
-    if presets:
-        pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
-        if pick != "(선택)":
-            if st.button("프리셋 적용"):
-                # 4) 적용 시에도 현 옵션에 없는 키는 제거
-                st.session_state.selected_keys = [k for k in presets[pick] if k in all_keys]
-                st.session_state.preset_name = pick
-                st.success(f"프리셋 '{pick}' 적용")
-                st.rerun()  # 즉시 재구성
+    cols = st.columns([2, 1])
+    with cols[0]:
+        st.subheader("설문 선택")
+        sel = st.multiselect(
+            "실시할 설문을 선택하세요",
+            options=all_keys,
+            format_func=lambda k: key_to_title.get(k, k),
+            default=st.session_state.selected_keys,
+        )
+        # 선택 직후 정리(중복 제거 + 유효키만 유지) — 플리커 방지 2
+        sel = list(dict.fromkeys([k for k in sel if k in all_keys]))
+        st.session_state.selected_keys = sel
+
+        with st.expander("프리셋 관리", expanded=False):
+            preset_col1, preset_col2 = st.columns([3, 1])
+            with preset_col1:
+                preset_name = st.text_input("프리셋 이름", value=st.session_state.preset_name)
+            with preset_col2:
+                if st.button("저장"):
+                    if preset_name.strip():
+                        presets[preset_name.strip()] = st.session_state.selected_keys
+                        presets_path.parent.mkdir(parents=True, exist_ok=True)
+                        json.dump(presets, open(presets_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+                        st.success("프리셋 저장 완료")
+                        st.session_state.preset_name = preset_name.strip()
+                    else:
+                        st.warning("프리셋 이름을 입력하세요.")
+
+            if presets:
+                pick = st.selectbox("불러오기", options=["(선택)"] + list(presets.keys()))
+                if pick != "(선택)":
+                    if st.button("프리셋 적용"):
+                        st.session_state.selected_keys = [k for k in presets[pick] if k in all_keys]
+                        st.session_state.preset_name = pick
+                        st.success(f"프리셋 '{pick}' 적용")
+                        st.rerun()  # 즉시 재구성
 
     with cols[1]:
         st.subheader("참여자/동의")

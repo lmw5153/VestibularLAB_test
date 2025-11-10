@@ -1,14 +1,11 @@
-# app.py — Multi Survey Platform (Neurology / Cognitive)
-# Keyboard UX:
-#  - 첫 진입: 응답 위젯에 자동 포커스(클릭 불필요, 화살표 즉시 작동)
-#  - Space: [answer]→[next 포커스]→[next 실행]
-#  - Z:     [answer]→[prev 포커스]→[prev 실행]
-#  - 항목 전환 시 위 알고리즘이 항상 초기화(응답 포커스부터)
-# 기타:
-#  - Sidebar collapsed / DOB yyyy.mm.dd 텍스트 / 동의만 체크시 시작
-#  - Surveys: DHI, VADL, MIDAS, HIT-6, VAS-D, PHQ-9, GAD-7
-#  - CSV에서 *_max 제거
-#  - LLM 키는 secrets만 사용
+# app.py — Multi Survey Platform (Mouse-only / No keyboard hooks)
+# - Sidebar collapsed
+# - DOB yyyy.mm.dd 텍스트(선택), 개인정보 동의만 있으면 시작
+# - Surveys: DHI, VADL, MIDAS, HIT-6, VAS-D, PHQ-9, GAD-7
+# - VADL: 적용불능(NA) 지원
+# - CSV 요약( *_max 컬럼 제거 )
+# - Google Sheets(옵션)
+# - LLM 분석: st.secrets["openai_api_key"]만 사용
 
 import os, sys, time, json
 from io import StringIO
@@ -17,7 +14,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 # ─────────────────────────────────────────────────────────────
 # Project path
@@ -79,28 +75,10 @@ def mask_key(k: str, show: int = 4) -> str:
     return k if len(k) <= show * 2 else k[:show] + "•" * 8 + k[-show:]
 
 # ─────────────────────────────────────────────────────────────
-# Query param helpers (keyboard bridge)
-# ─────────────────────────────────────────────────────────────
-def get_qp(key: str, default=None):
-    try:
-        return st.query_params.get(key, default)
-    except Exception:
-        vals = st.experimental_get_query_params().get(key, [default])
-        return vals if not isinstance(vals, list) else (vals[0] if vals else default)
-
-def set_qp(**kwargs):
-    try:
-        st.query_params.clear()
-        for k, v in kwargs.items():
-            if v is not None:
-                st.query_params[k] = v
-    except Exception:
-        st.experimental_set_query_params(**{k:[v] for k,v in kwargs.items() if v is not None})
-
-# ─────────────────────────────────────────────────────────────
 # Utils
 # ─────────────────────────────────────────────────────────────
 def normalize_items(items):
+    """items에 no/domain/text가 없으면 보정."""
     out = []
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
@@ -125,8 +103,6 @@ def init_state():
         # UX
         loading_until=0.0,
         _pending_preset=None,
-        # keyboard focus target: 'answer' | 'next' | 'prev'
-        kb_target="answer",
     )
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -248,9 +224,10 @@ if st.session_state.page == 1:
         pid = st.text_input("연구 ID (선택)", value=st.session_state.participant_id)
 
         agree = st.checkbox("개인정보 이용에 동의합니다.")
-        start_disabled = not agree
+        start_disabled = not agree  # 동의만 하면 시작 가능
 
         if st.button("검사 시작", type="primary", disabled=start_disabled):
+            # DOB parsing
             birth_iso = ""
             s = dob_text.strip()
             if s:
@@ -276,149 +253,14 @@ if st.session_state.page == 1:
             st.session_state.curr_idx = 0
             st.session_state.answers_map = {}
             st.session_state.summaries = {}
-            st.session_state.kb_target = "answer"    # ← 초기화
             st.session_state.page = 2
             st.session_state.loading_until = time.time() + 1.0
             st.rerun()
 
-    st.divider()
-    with st.expander("⌨️ 키보드 사용 팁", expanded=False):
-        st.markdown(
-            "- **Space**: [응답 포커스]→[다음 버튼 포커스]→[다음 실행]\n"
-            "- **Z**: [응답 포커스]→[이전 버튼 포커스]→[이전 실행]\n"
-            "- **Radio**: **↑ / ↓**\n"
-            "- **Slider**: **← / →**\n"
-        )
-
 # ─────────────────────────────────────────────────────────────
-# PAGE 2 — Survey flow (focus choreography)
+# PAGE 2 — Survey flow (mouse only)
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 2:
-    # JS: 전역 키 훅 + 포커스 이동/하이라이트
-    #  - 페이지 진입 시 응답 위젯 포커스
-    #  - Space: next로 포커스 이동 → 다음 Space 시 실행
-    #  - Z: prev로 포커스 이동 → 다음 Z 시 실행
-    components.html(f"""
-    <style>
-      #kbtrap {{ position:fixed; opacity:0; pointer-events:none; width:1px; height:1px; left:0; top:0; }}
-      .kbd-focus {{ outline: 3px solid var(--primary-color, #2e7df6); outline-offset: 4px; border-radius: 6px; }}
-    </style>
-    <input id="kbtrap" type="text" autofocus />
-    <script>
-    (function(){{
-      const state = {{
-        target: "{st.session_state.get('kb_target','answer')}",   // 'answer' | 'next' | 'prev'
-        nextLabel: "다음", prevLabel: "이전", submitLabel: "제출", nextSurvey: "다음 설문"
-      }};
-
-      function refocusTrap(){{
-        const trap = document.getElementById('kbtrap');
-        try {{ trap && trap.focus({{preventScroll:true}}); }} catch(e){{}}
-      }}
-      window.addEventListener('load', ()=>setTimeout(()=>{{refocusTrap(); focusAnswer(); drawHighlight();}}, 60));
-      document.addEventListener('visibilitychange', ()=>{{refocusTrap();}});
-
-      function q(sel) {{ return document.querySelector(sel); }}
-      function qa(sel) {{ return Array.from(document.querySelectorAll(sel)); }}
-
-      // 1) 응답 위젯에 포커스
-      function focusAnswer(){{
-        // 라디오
-        let r = q('[data-testid="stRadio"] input[type="radio"]');
-        if (r) {{ r.focus({{preventScroll:true}}); return; }}
-        // 슬라이더
-        let s = q('div[role="slider"]');
-        if (s) {{ s.focus({{preventScroll:true}}); return; }}
-        // 넘버 인풋
-        let n = q('input[type="number"]');
-        if (n) {{ n.focus({{preventScroll:true}}); return; }}
-      }}
-
-      // 2) 버튼 찾기(텍스트 매칭)
-      function findButtonByText(txt){{
-        const btns = qa('button');
-        for (const b of btns){{
-          const t = (b.innerText || '').trim();
-          if (t === txt) return b;
-        }}
-        return null;
-      }}
-
-      function focusNextBtn(){{
-        // 후보 라벨: 제출 / 다음 설문 / 다음
-        const b = findButtonByText(state.submitLabel) || findButtonByText(state.nextSurvey) || findButtonByText(state.nextLabel);
-        if (b) {{ b.focus({{preventScroll:true}}); }}
-      }}
-
-      function focusPrevBtn(){{
-        const b = findButtonByText(state.prevLabel);
-        if (b) {{ b.focus({{preventScroll:true}}); }}
-      }}
-
-      // 3) 하이라이트 표시
-      function clearHighlights(){{
-        qa('.kbd-focus').forEach(el=>el.classList.remove('kbd-focus'));
-      }}
-      function drawHighlight(){{
-        clearHighlights();
-        if (state.target === 'next'){{
-          const b = findButtonByText(state.submitLabel) || findButtonByText(state.nextSurvey) || findButtonByText(state.nextLabel);
-          if (b) b.classList.add('kbd-focus');
-        }} else if (state.target === 'prev'){{
-          const b = findButtonByText(state.prevLabel);
-          if (b) b.classList.add('kbd-focus');
-        }}
-      }}
-
-      // 4) 파라미터 전송
-      function fire(action, ev){{
-        try {{
-          if (ev) ev.preventDefault();
-          const url = new URL(window.location.href);
-          url.searchParams.set('kb', action);
-          window.location.href = url.toString();
-        }} catch(e){{}}
-      }}
-
-      // 5) 키 처리
-      window.addEventListener('keydown', function(e){{
-        if (e.code === 'Space'){{
-          if (state.target === 'answer'){{
-            state.target = 'next';
-            focusNextBtn(); drawHighlight();
-            e.preventDefault(); return;
-          }} else if (state.target === 'next'){{
-            fire('next', e); return;
-          }} else if (state.target === 'prev'){{
-            // prev 포커스 상태에서 Space 누르면 그대로 prev 실행
-            fire('prev-confirm', e); return;
-          }}
-        }}
-        if (e.key === 'z' || e.key === 'Z'){{
-          if (state.target === 'answer'){{
-            state.target = 'prev';
-            focusPrevBtn(); drawHighlight();
-            e.preventDefault(); return;
-          }} else if (state.target === 'prev'){{
-            fire('prev', e); return;
-          }} else if (state.target === 'next'){{
-            // next 포커스 상태에서 Z를 누르면 prev 실행(즉시 이동 원하면 prev-confirm로 바꿀 수 있음)
-            fire('prev-confirm', e); return;
-          }}
-        }}
-
-        // 화살표는 응답 포커스일 때 기본 동작(네이티브)을 살림
-        if (state.target !== 'answer'){{
-          if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){{
-            e.preventDefault(); // 버튼 포커스 중엔 페이지 스크롤 방지
-          }}
-        }}
-      }}, {{passive:false}});
-    }})();
-    </script>
-    """, height=0)
-
-    # 진행 상태
     queue = st.session_state.queue
     idx = st.session_state.curr_idx
     if idx >= len(queue):
@@ -463,9 +305,7 @@ elif st.session_state.page == 2:
     is_last_survey = (st.session_state.curr_idx == len(st.session_state.queue) - 1)
     btn_label = "제출" if (is_last_item and is_last_survey) else ("다음 설문" if is_last_item else "다음")
 
-    # 기본 응답값(항상 세팅) + kb_target 초기화(문항 진입 시 answer)
-    st.session_state.kb_target = "answer"
-
+    # 기본값 주입(문항 진입 시 한 번만)
     if input_type == "radio":
         labels = [c[0] for c in meta.get("choices", [])]
         if labels:
@@ -488,10 +328,8 @@ elif st.session_state.page == 2:
         if ss_key not in st.session_state:
             st.session_state[ss_key] = int(it.get("min", 0))
 
-    # 키보드 쿼리 파라미터 처리
-    kb = get_qp("kb", None)
-
-    def _save_and_advance_next():
+    # 입력 렌더링 + 버튼으로만 네비게이션
+    def _save_and_go_next():
         if input_type == "radio":
             sel = st.session_state.get(f"radio_{key}_{i}")
             score = dict(meta.get("choices", [])).get(sel, 0)
@@ -532,45 +370,7 @@ elif st.session_state.page == 2:
         else:
             st.session_state[f"i_{key}"] += 1
 
-    if kb:
-        handled = False
-        # prev-confirm: Space에서 prev 포커스 상태에서 실행하도록 분리
-        if kb == "prev-confirm":
-            kb = "prev"
-        target = st.session_state.get("kb_target","answer")
-
-        # Z/Space 두-단계 전환
-        if kb == "next":
-            if target == "answer":
-                st.session_state.kb_target = "next"; handled = True
-            elif target == "next":
-                _save_and_advance_next()
-                st.session_state.kb_target = "answer"; handled = True
-            elif target == "prev":
-                # prev 포커스에서 next 누르면 next 실행(선택)
-                _save_and_advance_next()
-                st.session_state.kb_target = "answer"; handled = True
-
-        elif kb in ("prev",):
-            if target == "answer":
-                st.session_state.kb_target = "prev"; handled = True
-            elif target == "prev":
-                if i > 0:
-                    st.session_state[f"i_{key}"] -= 1
-                st.session_state.kb_target = "answer"; handled = True
-            elif target == "next":
-                # next 포커스에서 prev를 누르면 prev 실행(선택)
-                if i > 0:
-                    st.session_state[f"i_{key}"] -= 1
-                st.session_state.kb_target = "answer"; handled = True
-
-        # 화살표는 응답 포커스일 때 네이티브 우선이므로 여기선 불필요(옵션으로 세션 상태 업데이트 가능)
-
-        if handled:
-            set_qp()
-            st.rerun()
-
-    # 입력 렌더링
+    # 위젯
     if input_type == "radio":
         labels = [c[0] for c in meta.get("choices", [])]
         if not labels:
@@ -580,36 +380,16 @@ elif st.session_state.page == 2:
         score = dict(meta.get("choices", [])).get(sel, 0)
 
         c1, c2 = st.columns(2)
-        prev_clicked = c1.button("이전", disabled=(i == 0))
-        next_clicked = c2.button(btn_label, type="primary")
-
-        if prev_clicked:
+        if c1.button("이전", disabled=(i == 0)):
             ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
             if i > 0:
                 st.session_state[f"i_{key}"] -= 1
-            st.session_state.kb_target = "answer"
             st.rerun()
 
-        if next_clicked:
-            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": sel, "score": score}
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.session_state.kb_target = "answer"
+        if c2.button(btn_label, type="primary"):
+            _save_and_go_next()
             st.rerun()
 
     elif input_type == "slider_1_10_na":
@@ -631,37 +411,17 @@ elif st.session_state.page == 2:
             st.warning("이 문항은 적용불능으로 저장됩니다 (합계/최대점 제외)")
 
         c1, c2 = st.columns(2)
-        prev_clicked = c1.button("이전", disabled=(i == 0))
-        next_clicked = c2.button(btn_label, type="primary")
-
-        ans = {"no": it_no, "domain": it_domain, "text": it_text,
-               "label": na_label if na else str(val), "score": None if na else val}
-
-        if prev_clicked:
+        if c1.button("이전", disabled=(i == 0)):
+            ans = {"no": it_no, "domain": it_domain, "text": it_text,
+                   "label": na_label if na else str(val), "score": None if na else val}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
             if i > 0:
                 st.session_state[f"i_{key}"] -= 1
-            st.session_state.kb_target = "answer"
             st.rerun()
 
-        if next_clicked:
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.session_state.kb_target = "answer"
+        if c2.button(btn_label, type="primary"):
+            _save_and_go_next()
             st.rerun()
 
     elif input_type == "number_int":
@@ -670,35 +430,16 @@ elif st.session_state.page == 2:
                               step=1, value=int(val), key=f"num_{key}_{i}")
 
         c1, c2 = st.columns(2)
-        prev_clicked = c1.button("이전", disabled=(i == 0))
-        next_clicked = c2.button(btn_label, type="primary")
-        ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
-
-        if prev_clicked:
+        if c1.button("이전", disabled=(i == 0)):
+            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
             if i > 0:
                 st.session_state[f"i_{key}"] -= 1
-            st.session_state.kb_target = "answer"
             st.rerun()
 
-        if next_clicked:
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.session_state.kb_target = "answer"
+        if c2.button(btn_label, type="primary"):
+            _save_and_go_next()
             st.rerun()
 
     elif input_type == "slider_0_10":
@@ -707,35 +448,16 @@ elif st.session_state.page == 2:
                         value=val, step=1, key=f"vas_{key}_{i}")
 
         c1, c2 = st.columns(2)
-        prev_clicked = c1.button("이전", disabled=(i == 0))
-        next_clicked = c2.button(btn_label, type="primary")
-        ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
-
-        if prev_clicked:
+        if c1.button("이전", disabled=(i == 0)):
+            ans = {"no": it_no, "domain": it_domain, "text": it_text, "label": str(val), "score": int(val)}
             if i < len(answers): answers[i] = ans
             else: answers.append(ans)
             if i > 0:
                 st.session_state[f"i_{key}"] -= 1
-            st.session_state.kb_target = "answer"
             st.rerun()
 
-        if next_clicked:
-            if i < len(answers): answers[i] = ans
-            else: answers.append(ans)
-            if is_last_item:
-                scorer = SCORERS.get(key)
-                summary = scorer.score(answers, meta) if scorer else {"total": None, "max": None, "domains": {}}
-                st.session_state.summaries[key] = summary
-                if is_last_survey:
-                    st.session_state.curr_idx += 1; st.session_state.page = 3
-                else:
-                    st.session_state.curr_idx += 1
-                    next_key = st.session_state.queue[st.session_state.curr_idx]
-                    st.session_state[f"i_{next_key}"] = 0
-                    st.session_state.page = 2
-            else:
-                st.session_state[f"i_{key}"] += 1
-            st.session_state.kb_target = "answer"
+        if c2.button(btn_label, type="primary"):
+            _save_and_go_next()
             st.rerun()
 
     else:
@@ -853,6 +575,6 @@ elif st.session_state.page == 3:
     st.divider()
     c1, c2 = st.columns(2)
     if c1.button("처음으로"):
-        st.session_state.page = 1; st.session_state.kb_target = "answer"; st.rerun()
+        st.session_state.page = 1; st.rerun()
     if c2.button("다시 진행"):
-        st.session_state.page = 2; st.session_state.curr_idx = 0; st.session_state.kb_target = "answer"; st.rerun()
+        st.session_state.page = 2; st.session_state.curr_idx = 0; st.rerun()

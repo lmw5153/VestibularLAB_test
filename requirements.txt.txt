@@ -1,0 +1,9 @@
+requirements.txt
+
+streamlit
+pandas
+openai>=1.0.0
+PyYAML
+gspread
+google-auth
+requests

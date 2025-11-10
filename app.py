@@ -6,7 +6,10 @@
 # - 마지막 문항 버튼 라벨: 제출/다음 설문/다음
 # - 규칙 기반 이상탐지 + LLM 추론 옵션 (키 자동 탐지)
 # - YAML 설문 로드(utils.registry) 가정
-
+import os, sys
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 import os
 import json
 import time

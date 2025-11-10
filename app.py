@@ -32,7 +32,25 @@ SCORERS = {
 
 st.set_page_config(page_title="인지 설문 플랫폼 (멀티)", layout="wide")
 
+def _mask_key(k: str, show=4) -> str:
+    if not k:
+        return "(없음)"
+    if len(k) <= show*2:
+        return "*" * len(k)
+    return k[:show] + "•" * 8 + k[-show:]
 
+def _get_openai_key_safe() -> str:
+    # st.secrets 우선 → 환경변수 폴백 (이미 사용중인 _get_openai_key()와 동일한 로직이면 그걸 써도 OK)
+    try:
+        if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
+            return st.secrets["openai_api_key"]
+        if "general" in st.secrets:
+            gen = st.secrets["general"]
+            if isinstance(gen, dict) and gen.get("openai_api_key"):
+                return gen["openai_api_key"]
+    except Exception:
+        pass
+    return os.getenv("OPENAI_API_KEY", "")
 # ─────────────────────────────────────────────────────────────
 # 안전 보정: YAML에서 누락된 필드(no/domain/text) 자동 채움
 # ─────────────────────────────────────────────────────────────
@@ -102,7 +120,10 @@ st.sidebar.subheader("Google Sheets 연동(옵션)")
 gs_enable = st.sidebar.checkbox("응답을 Google Sheets로 저장", value=False)
 gs_url = st.sidebar.text_input("스프레드시트 URL", placeholder="https://docs.google.com/...", disabled=not gs_enable)
 gs_ws = st.sidebar.text_input("워크시트 이름", value="responses", disabled=not gs_enable)
-
+with st.sidebar.expander("🔐 키 상태(마스킹)"):
+    k = _get_openai_key_safe()
+    st.write("OPENAI_API_KEY:", _mask_key(k))
+    st.caption("※ 실제 값은 브라우저로 노출하지 않습니다.")
 
 # ─────────────────────────────────────────────────────────────
 # PAGE 1 — Main: 설문 선택/프리셋/참여자 입력/시작 (지연 로딩 스피너)

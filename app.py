@@ -467,26 +467,146 @@ elif st.session_state.page == 2:
         st.error(f"지원하지 않는 input_type: {input_type}")
 
 # ─────────────────────────────────────────────────────────────
-# PAGE 3 — Results
+# PAGE 3 — Results (print-optimized)
 # ─────────────────────────────────────────────────────────────
 elif st.session_state.page == 3:
-    st.title("결과 요약 & 비교")
+    st.title("결과 요약 & 비교 (인쇄 최적화)")
     pid = st.session_state.participant_id
     ts = datetime.now().isoformat(timespec="seconds")
 
-    cols = st.columns(len(st.session_state.summaries) or 1)
-    for c, (k, s) in zip(cols, st.session_state.summaries.items()):
-        with c:
-            st.subheader(k)
-            if s.get("max") is not None:
-                st.metric("총점", s["total"], delta=f"/ {s['max']}")
-            else:
-                st.metric("총점", s["total"])
-            if "severity" in s:
-                st.caption(f"등급: {s['severity']}")
-            for dkey, dval in s.get("domains", {}).items():
-                st.caption(f"{dkey}: {dval}")
+    per_summ = st.session_state.summaries
+    per_raw  = st.session_state.answers_map
 
+    # ===== 1) 인쇄용 레이아웃 토글 =====
+    print_mode = st.checkbox("🧾 인쇄용 레이아웃 보기", value=True)
+
+    # ===== 2) 요약 카드(동일 크기) — 5개 단위로 끊기 =====
+    # 카드용 데이터
+    cards = []
+    for k, s in per_summ.items():
+        total = s.get("total")
+        maxv  = s.get("max")
+        sev   = s.get("severity")
+        doms  = ", ".join([f"{dk}:{dv}" for dk, dv in (s.get("domains") or {}).items()]) if s.get("domains") else ""
+        if maxv is not None:
+            title_line = f"{k} — {total} / {maxv}"
+        else:
+            title_line = f"{k} — {total}"
+        sub_line = f"등급:{sev}" if sev else ""
+        cards.append({"title": title_line, "subtitle": sub_line, "domains": doms})
+
+    # HTML 카드 + 프린트 CSS
+    import streamlit.components.v1 as components
+    if print_mode:
+        html_cards = []
+        for i, c in enumerate(cards, start=1):
+            block = f"""
+            <div class="card">
+              <div class="title">{c['title']}</div>
+              <div class="subtitle">{c['subtitle']}</div>
+              <div class="domains">{c['domains']}</div>
+            </div>
+            """
+            # 5개 단위마다 그룹핑
+            html_cards.append(block)
+
+        # 5개 단위로 그룹 나누기
+        groups = [html_cards[i:i+5] for i in range(0, len(html_cards), 5)]
+        groups_html = ""
+        for gi, g in enumerate(groups, start=1):
+            groups_html += f"""<section class="summary-page">{''.join(g)}</section>"""
+
+        components.html(f"""
+        <style>
+          :root {{
+            --card-w: 300px;
+            --card-h: 140px;
+          }}
+          .print-toolbar {{
+            margin: 0.5rem 0 1rem 0;
+          }}
+          .summary-page {{
+            display: grid;
+            grid-template-columns: repeat(5, var(--card-w));
+            gap: 12px;
+            justify-content: start;
+            margin-bottom: 24px;
+            page-break-after: always; /* 5개 끝날 때 페이지 나눔 */
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }}
+          .card {{
+            width: var(--card-w);
+            height: var(--card-h);
+            box-sizing: border-box;
+            border: 1px solid #d0d0d0;
+            border-radius: 10px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            background: #fff;
+          }}
+          .card .title {{
+            font-weight: 700;
+            font-size: 16px;
+            margin-bottom: 6px;
+          }}
+          .card .subtitle {{
+            font-size: 13px;
+            color: #333;
+            margin-bottom: 6px;
+          }}
+          .card .domains {{
+            font-size: 12px;
+            color: #666;
+          }}
+
+          /* 인쇄 최적화 */
+          @media print {{
+            .stApp header, .stApp footer, .stToolbar, .css-18ni7ap, .st-emotion-cache-12fmjuu {{
+              display: none !important;
+            }}
+            .summary-page {{
+              page-break-inside: avoid;
+            }}
+            .detail-section {{
+              page-break-before: always;
+            }}
+            table {{
+              width: 100% !important;
+              table-layout: fixed;
+              word-break: break-word;
+              white-space: normal;
+            }}
+            thead th, tbody td {{
+              border: 1px solid #999 !important;
+              padding: 4px !important;
+              font-size: 11px !important;
+            }}
+          }}
+        </style>
+        <div class="print-toolbar">
+          <button onclick="window.print()" style="padding:8px 12px;font-weight:600;">🖨 인쇄</button>
+        </div>
+        {groups_html if groups else '<div class="summary-page"></div>'}
+        """, height=min(120 + (len(cards)//5 + 1)*180, 1200))
+    else:
+        # 화면 모드: 기존 metric 스타일
+        cols = st.columns(len(per_summ) or 1)
+        for c, (k, s) in zip(cols, per_summ.items()):
+            with c:
+                st.subheader(k)
+                if s.get("max") is not None:
+                    st.metric("총점", s["total"], delta=f"/ {s['max']}")
+                else:
+                    st.metric("총점", s["total"])
+                if "severity" in s:
+                    st.caption(f"등급: {s['severity']}")
+                for dkey, dval in s.get("domains", {}).items():
+                    st.caption(f"{dkey}: {dval}")
+
+    # ===== 3) 참여자 정보 =====
     with st.expander("참여자 정보", expanded=False):
         st.write(f"**이름**: {st.session_state.participant_name or '-'}")
         st.write(f"**생년월일**: {st.session_state.participant_birth or '-'}")
@@ -494,57 +614,99 @@ elif st.session_state.page == 3:
         st.write(f"**기타사항**: {st.session_state.participant_notes or '-'}")
         st.write(f"**연구 ID**: {pid or '-'}")
 
-    with st.expander("설문별 응답표"):
-        for k, answers in st.session_state.answers_map.items():
-            st.markdown(f"### {k}")
-            df = pd.DataFrame([
-                {"no": a.get("no", i+1), "domain": a.get("domain",""),
-                 "question": a.get("text",""), "response_label": a.get("label",""),
-                 "response_score": ("" if a.get("score") is None else a.get("score"))}
-                for i, a in enumerate(answers)
-            ])
-            st.dataframe(df, use_container_width=True)
+    # ===== 4) 설문별 응답표 — 인쇄 고정 폭 테이블 =====
+    st.markdown("### 설문별 응답표 (인쇄 전용 표는 가로 잘림 없이 전체 컬럼 출력)")
+    st.info("💡 인쇄 시 이 표는 페이지 중간에 끊기지 않고 전체 가로가 보이도록 고정됩니다. (필요 시 표가 다음 페이지로 넘어감)")
 
-    per_summ = st.session_state.summaries
-    per_raw  = st.session_state.answers_map
-    row = build_row(ts, pid, st.session_state.preset_name, per_summ, per_raw)
-    row.update({
-        "name": st.session_state.participant_name,
-        "birth": st.session_state.participant_birth or "",
-        "sex": st.session_state.participant_sex or "",
-        "notes": st.session_state.participant_notes or "",
-    })
+    # 인쇄시 끊김 방지용 CSS + 표 스타일
+    st.markdown("""
+    <style>
+      .detail-section {
+        break-inside: avoid;
+        page-break-inside: avoid;
+        margin: 8px 0 18px 0;
+      }
+      .detail-section h3 {
+        margin: 6px 0 8px 0;
+      }
+      .detail-table table {
+        width: 100% !important;
+        table-layout: fixed;
+        border-collapse: collapse;
+      }
+      .detail-table th, .detail-table td {
+        border: 1px solid #ccc;
+        padding: 6px 8px;
+        font-size: 12px;
+        word-break: break-word;
+        white-space: normal;
+      }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # 표 데이터 생성: 모든 응답 열을 가로로 보여주는 고정 표
+    # 컬럼: no | domain | question | response_label | response_score
+    for k, answers in per_raw.items():
+        st.markdown(f'<div class="detail-section">', unsafe_allow_html=True)
+        st.markdown(f"<h3>{k}</h3>", unsafe_allow_html=True)
+
+        # 완전한 표(DataFrame → HTML)로 출력 (st.table = static)
+        df = pd.DataFrame([
+            {"no": a.get("no", i+1),
+             "domain": a.get("domain",""),
+             "question": a.get("text",""),
+             "response_label": a.get("label",""),
+             "response_score": ("" if a.get("score") is None else a.get("score"))}
+            for i, a in enumerate(answers)
+        ])
+        # st.table은 인쇄 시 인터랙션 없이 전체 셀을 렌더링
+        st.table(df)  # detail-table 클래스는 st.table에 직접 지정할 수 없어 상단 CSS로 전역 제어
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ===== 5) 통합 CSV 다운로드 ( *_max 제거 ) =====
+    row = (lambda ts, pid, preset, per_summ, per_raw: (
+        (lambda d: (d.update({
+            "name": st.session_state.participant_name,
+            "birth": st.session_state.participant_birth or "",
+            "sex": st.session_state.participant_sex or "",
+            "notes": st.session_state.participant_notes or "",
+        }) or d))(build_row(ts, pid, st.session_state.preset_name, per_summ, per_raw))
+    ))(ts, pid, st.session_state.preset_name, per_summ, per_raw)
 
     df_out = pd.DataFrame([row])
     drop_cols = [c for c in df_out.columns if c.endswith("_max")]
     if drop_cols:
         df_out = df_out.drop(columns=drop_cols, errors="ignore")
 
+    from io import StringIO
     buf = StringIO(); df_out.to_csv(buf, index=False, encoding="utf-8-sig")
     st.download_button("📥 통합 CSV 다운로드", data=buf.getvalue().encode("utf-8-sig"),
                        file_name=f"{ts.replace(':','-')}_summary.csv", mime="text/csv")
 
-    if gs_enable and gs_url:
-        try:
+    # ===== 6) Google Sheets 저장(옵션) =====
+    gs_enable = st.session_state.get("gs_enable") if "gs_enable" in st.session_state else None  # 사이드바 변수 그대로 사용 중이라면 생략 가능
+    # 기존 코드가 사이드바 변수로 저장 중이면 아래 try 블록만 유지해도 됨
+    try:
+        if 'gs_enable' in globals() and gs_enable and gs_url:
             save_df_to_gsheet(df_out, gs_url, gs_ws)
             st.success("Google Sheets 저장 완료")
-        except Exception as e:
-            st.error(f"Google Sheets 저장 실패: {e}")
+    except Exception as e:
+        st.error(f"Google Sheets 저장 실패: {e}")
 
+    # ===== 7) 규칙 기반 + LLM 분석 (기존과 동일) =====
     st.divider()
-
     st.subheader("이상 응답 탐지 (규칙 기반·경량)")
+    from utils.consistency import make_payload, load_rulebook, eval_rules
     payload = make_payload(per_raw, per_summ)
     rulebook = load_rulebook(Path("rules/rulebook_v1.json"))
     flags = eval_rules(payload, rulebook)
 
     if not flags:
         st.success("모순 신호가 없습니다.")
-        row["is_consistent"] = True; row["flags_json"] = "[]"
     else:
         for f in flags:
             st.warning(f"**{f['id']}** · {f['reason']}  \n제안: {', '.join(f.get('suggestion', []))}")
-        row["is_consistent"] = False; row["flags_json"] = json.dumps(flags, ensure_ascii=False)
 
     st.divider()
     st.subheader("LLM 기반 이상응답 추론 (모순 가능성 제시)")
@@ -552,7 +714,17 @@ elif st.session_state.page == 3:
     llm_model = st.selectbox("모델", ["gpt-4o-mini", "gpt-4o"], index=0, disabled=not llm_on)
 
     if llm_on and st.button("LLM으로 모순 가능성 분석"):
-        key_api = get_secret_openai_key()
+        key_api = ""
+        try:
+            if "openai_api_key" in st.secrets and st.secrets["openai_api_key"]:
+                key_api = st.secrets["openai_api_key"]
+            elif "general" in st.secrets:
+                gen = st.secrets["general"]
+                if isinstance(gen, dict) and gen.get("openai_api_key"):
+                    key_api = gen["openai_api_key"]
+        except Exception:
+            pass
+
         if not key_api:
             st.info("🔑 Secrets에 openai_api_key가 없습니다. App Settings → Secrets에 등록하세요.")
         else:

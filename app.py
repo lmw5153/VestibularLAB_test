@@ -132,8 +132,10 @@ with st.sidebar.expander("🔐 LLM 키 상태(마스킹)"):
 # ─────────────────────────────────────────────────────────────
 if st.session_state.page == 1:
     st.title("🧠 설문 검사 플랫폼 — Vestibular LAB")
+    st.write("공 지 사 항")
     st.write("전북대 신경과 내 자체 개발한 설문 플랫폼입니다")
     st.write("설문지 종류는 현재 9개가 구현되었고 지속적으로 업데이트 예정입니다")
+    st.write("점수 계산 방식 수정 중...")
     st.write("생성형 AI를 이용한 응답에 대한 신뢰성을 확인할 수 있습니다")
     st.caption("Minwoo Lee")
     metas = list_surveys()
